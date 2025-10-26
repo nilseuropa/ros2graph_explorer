@@ -10,7 +10,8 @@ packages required.
 | Path | Purpose |
 | --- | --- |
 | `ros2_graph/ros2_graph_node.py` | Main `rclpy` node that samples the ROS graph, prints it to stdout, and optionally serves it over HTTP. |
-| `ros2_graph/web/server.py` | Pure-stdlib HTTP server plus the embedded HTML/JS canvas viewer served at `/`. |
+| `ros2_graph/web/server.py` | Pure-stdlib HTTP server that serves JSON endpoints + static assets. |
+| `ros2_graph/web/static/*` | HTML/CSS/JS bundle for the browser canvas visualization. |
 | `resource/ros2_graph` & `setup.py` | Standard ament metadata and entry point (`ros2_graph = ros2_graph.ros2_graph_node:main`). |
 
 ## How it works
