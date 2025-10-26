@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
+from .web import GraphWebServer
 
 
 @dataclass(frozen=True)
@@ -171,10 +172,22 @@ class Ros2GraphNode(Node):
         self.declare_parameter('output_format', 'dot')
         self.declare_parameter('update_interval', 2.0)
         self.declare_parameter('print_once', False)
+        self.declare_parameter('web_enable', True)
+        self.declare_parameter('web_host', '0.0.0.0')
+        self.declare_parameter('web_port', 8734)
 
         interval = max(float(self.get_parameter('update_interval').value), 0.1)
         self._output_format = str(self.get_parameter('output_format').value).lower()
         self._print_once = bool(self.get_parameter('print_once').value)
+        self._web_server: Optional[GraphWebServer] = None
+        if bool(self.get_parameter('web_enable').value):
+            host = str(self.get_parameter('web_host').value or '0.0.0.0')
+            port = int(self.get_parameter('web_port').value or 8734)
+            try:
+                self._web_server = GraphWebServer(host, port, self.get_logger())
+                self._web_server.start()
+            except OSError as exc:
+                self.get_logger().error(f'Failed to start web server on {host}:{port} ({exc})')
 
         self._builder = GraphBuilder(self)
         self._last_fingerprint: str | None = None
@@ -189,8 +202,9 @@ class Ros2GraphNode(Node):
         if fingerprint == self._last_fingerprint:
             return
 
-        self._last_fingerprint = fingerprint
         self._emit_snapshot(snapshot)
+        self._publish_web(snapshot, fingerprint)
+        self._last_fingerprint = fingerprint
 
         if self._print_once:
             self.get_logger().info('print_once=true, shutting down after first update')
@@ -214,6 +228,19 @@ class Ros2GraphNode(Node):
             f'graph updated ({len(snapshot.nodes)} nodes, '
             f'{len(snapshot.topics)} topics, {len(snapshot.edges)} edges)'
         )
+
+    def _publish_web(self, snapshot: GraphSnapshot, fingerprint: str) -> None:
+        if not self._web_server:
+            return
+        try:
+            self._web_server.publish(snapshot, fingerprint)
+        except Exception:  # pragma: no cover - defensive
+            self.get_logger().exception('Failed to push graph update to web clients')
+
+    def destroy_node(self) -> bool:
+        if self._web_server:
+            self._web_server.stop()
+        return super().destroy_node()
 
 
 def main() -> None:
