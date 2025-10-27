@@ -4,12 +4,278 @@ const metaEl = document.getElementById('meta');
 const statusEl = document.getElementById('status');
 const refreshBtn = document.getElementById('refreshBtn');
 let lastGraph = null;
+const BASE_FONT_FAMILY = '"Times New Roman", serif';
+const BASE_FONT_SIZE = 14;
+const BASE_LINE_HEIGHT = 18;
 
-function clipLabel(text, maxLen = 24) {
-  if (!text) {
-    return '';
+function stripQuotes(value) {
+  if (!value) {
+    return value;
   }
-  return text.length > maxLen ? text.slice(0, maxLen - 1) + '…' : text;
+  if (value.startsWith('"') && value.endsWith('"')) {
+    return value.slice(1, -1).replace(/\\"/g, '"');
+  }
+  return value;
+}
+
+function parseGraphvizPlain(plainText) {
+  if (!plainText) {
+    return null;
+  }
+  const lines = plainText.trim().split(/\r?\n/);
+  if (!lines.length) {
+    return null;
+  }
+
+  const nodes = {};
+  const edges = [];
+  let width = 0;
+  let height = 0;
+  let scale = 1;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+    const parts = line.split(/\s+/);
+    const kind = parts[0];
+    if (kind === 'graph' && parts.length >= 4) {
+      const maybeScale = parseFloat(parts[1]);
+      if (!Number.isNaN(maybeScale) && maybeScale > 0) {
+        scale = maybeScale;
+      }
+      const maybeWidth = parseFloat(parts[2]);
+      const maybeHeight = parseFloat(parts[3]);
+      if (!Number.isNaN(maybeWidth)) {
+        width = maybeWidth;
+      }
+      if (!Number.isNaN(maybeHeight)) {
+        height = maybeHeight;
+      }
+    } else if (kind === 'node' && parts.length >= 6) {
+      const name = stripQuotes(parts[1]);
+      const x = parseFloat(parts[2]);
+      const y = parseFloat(parts[3]);
+      if (Number.isNaN(x) || Number.isNaN(y)) {
+        continue;
+      }
+      const labelToken = stripQuotes(parts[6] ?? '');
+      const label =
+        labelToken && labelToken.length
+          ? labelToken.replace(/\\[nlr]/g, '\n')
+          : name;
+      const style = stripQuotes(parts[7] ?? '');
+      const shape = stripQuotes(parts[8] ?? '');
+      const strokeColor = stripQuotes(parts[9] ?? '');
+      const fillColor = stripQuotes(parts[10] ?? '');
+      nodes[name] = {
+        x,
+        y,
+        width: parseFloat(parts[4]),
+        height: parseFloat(parts[5]),
+        label,
+        rawLabel: labelToken,
+        style,
+        shape,
+        strokeColor,
+        fillColor,
+      };
+    } else if (kind === 'edge' && parts.length >= 4) {
+      const tail = stripQuotes(parts[1]);
+      const head = stripQuotes(parts[2]);
+      const pointCount = parseInt(parts[3], 10);
+      if (Number.isNaN(pointCount) || pointCount <= 0) {
+        continue;
+      }
+      const points = [];
+      let idx = 4;
+      for (let i = 0; i < pointCount && idx + 1 < parts.length; i += 1) {
+        const x = parseFloat(parts[idx]);
+        const y = parseFloat(parts[idx + 1]);
+        idx += 2;
+        if (Number.isNaN(x) || Number.isNaN(y)) {
+          continue;
+        }
+        points.push({ x, y });
+      }
+      if (points.length >= 2) {
+        edges.push({ tail, head, points });
+      }
+    }
+  }
+
+  if (!width || !height || !Object.keys(nodes).length) {
+    return null;
+  }
+
+  return { scale, width, height, nodes, edges };
+}
+
+function createGraphvizScaler(layout, canvasWidth, canvasHeight) {
+  const margin = 40;
+  const layoutScale = layout.scale && Number.isFinite(layout.scale) && layout.scale > 0 ? layout.scale : 1;
+  const scaledWidth = layout.width * layoutScale;
+  const scaledHeight = layout.height * layoutScale;
+  if (!scaledWidth || !scaledHeight) {
+    return null;
+  }
+
+  const scaleX = (canvasWidth - margin * 2) / scaledWidth;
+  const scaleY = (canvasHeight - margin * 2) / scaledHeight;
+  const scale = Math.min(scaleX, scaleY);
+  if (!Number.isFinite(scale) || scale <= 0) {
+    return null;
+  }
+
+  const scaledCanvasWidth = scaledWidth * scale;
+  const scaledCanvasHeight = scaledHeight * scale;
+  const offsetX = (canvasWidth - scaledCanvasWidth) / 2;
+  const offsetY = (canvasHeight - scaledCanvasHeight) / 2;
+
+  return {
+    scale,
+    toCanvas(point) {
+      return {
+        x: offsetX + point.x * layoutScale * scale,
+        y: canvasHeight - (offsetY + point.y * layoutScale * scale),
+      };
+    },
+    scaleLength(length) {
+      return length * layoutScale * scale;
+    },
+  };
+}
+
+function buildGraphvizEdgeLookup(layout, scaler) {
+  const map = new Map();
+  layout.edges.forEach(edge => {
+    if (!edge.points || edge.points.length < 2) {
+      return;
+    }
+    const transformed = edge.points.map(point => scaler.toCanvas(point));
+    const key = edge.tail + '->' + edge.head;
+    if (!map.has(key)) {
+      map.set(key, []);
+    }
+    map.get(key).push(transformed);
+  });
+  return map;
+}
+
+function computePolylineMidpoint(points) {
+  if (!points || points.length === 0) {
+    return null;
+  }
+  if (points.length === 1) {
+    return points[0];
+  }
+  let total = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    total += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+  }
+  if (total === 0) {
+    return points[0];
+  }
+  const half = total / 2;
+  let traversed = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    const start = points[i - 1];
+    const end = points[i];
+    const segment = Math.hypot(end.x - start.x, end.y - start.y);
+    if (segment === 0) {
+      continue;
+    }
+    if (traversed + segment >= half) {
+      const ratio = (half - traversed) / segment;
+      return {
+        x: start.x + (end.x - start.x) * ratio,
+        y: start.y + (end.y - start.y) * ratio,
+      };
+    }
+    traversed += segment;
+  }
+  return points[points.length - 1];
+}
+
+function scalePointAround(point, origin, factor) {
+  return {
+    x: origin.x + (point.x - origin.x) * factor,
+    y: origin.y + (point.y - origin.y) * factor,
+  };
+}
+
+function computeLayoutOrigin(geometries) {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  geometries.forEach(geom => {
+    minX = Math.min(minX, geom.center.x);
+    maxX = Math.max(maxX, geom.center.x);
+    minY = Math.min(minY, geom.center.y);
+    maxY = Math.max(maxY, geom.center.y);
+  });
+  if (!Number.isFinite(minX) || !Number.isFinite(maxX)) {
+    return { x: 0, y: 0 };
+  }
+  return { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+}
+
+function hasOverlapWithFactor(geometries, origin, factor) {
+  const margin = 6;
+  for (let i = 0; i < geometries.length; i += 1) {
+    const a = geometries[i];
+    const centerA = scalePointAround(a.center, origin, factor);
+    const halfWidthA = a.width / 2;
+    const halfHeightA = a.height / 2;
+    for (let j = i + 1; j < geometries.length; j += 1) {
+      const b = geometries[j];
+      const centerB = scalePointAround(b.center, origin, factor);
+      const halfWidthB = b.width / 2;
+      const halfHeightB = b.height / 2;
+      const overlapX = Math.abs(centerA.x - centerB.x) < (halfWidthA + halfWidthB + margin);
+      const overlapY = Math.abs(centerA.y - centerB.y) < (halfHeightA + halfHeightB + margin);
+      if (overlapX && overlapY) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function applySpreadAdjustment(nodeGeometry, edgeLookup) {
+  const entries = Object.values(nodeGeometry);
+  if (entries.length < 2) {
+    return;
+  }
+
+  const origin = computeLayoutOrigin(entries);
+  let factor = 1;
+  const maxFactor = 1.8;
+  const step = 0.05;
+
+  while (factor < maxFactor && hasOverlapWithFactor(entries, origin, factor)) {
+    factor += step;
+  }
+
+  if (factor <= 1.0001 || hasOverlapWithFactor(entries, origin, factor)) {
+    return;
+  }
+
+  entries.forEach(geom => {
+    geom.center = scalePointAround(geom.center, origin, factor);
+  });
+
+  if (edgeLookup) {
+    edgeLookup.forEach(paths => {
+      paths.forEach(path => {
+        for (let i = 0; i < path.length; i += 1) {
+          path[i] = scalePointAround(path[i], origin, factor);
+        }
+      });
+    });
+  }
 }
 
 function resizeCanvas() {
@@ -27,94 +293,337 @@ function renderGraph(graph) {
   if (!graph) {
     return;
   }
+
   lastGraph = graph;
   const width = canvas.width;
   const height = canvas.height;
   const nodeNames = graph.nodes || [];
   const topicNames = Object.keys(graph.topics || {});
 
-  const positions = {};
-  const nodeY = height * 0.3;
-  const topicY = height * 0.7;
-
-  function allocate(names, y) {
-    const count = names.length;
-    names.forEach((name, idx) => {
-      const x = count > 1 ? ((idx + 1) / (count + 1)) * width : width / 2;
-      positions[name] = { x, y };
-    });
+  if (!graph.graphviz?.plain) {
+    ctx.save();
+    ctx.fillStyle = '#c9d1d9';
+    ctx.font = '16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Graphviz layout not available', width / 2, height / 2);
+    ctx.restore();
+    return;
   }
 
-  allocate(nodeNames, nodeY);
-  allocate(topicNames, topicY);
-
-  function getPos(name) {
-    if (!positions[name]) {
-      positions[name] = { x: width / 2, y: height / 2 };
-    }
-    return positions[name];
+  const layout = parseGraphvizPlain(graph.graphviz.plain);
+  if (!layout) {
+    ctx.save();
+    ctx.fillStyle = '#c9d1d9';
+    ctx.font = '16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Graphviz layout could not be parsed', width / 2, height / 2);
+    ctx.restore();
+    return;
   }
 
-  ctx.lineWidth = 1.5;
-  ctx.strokeStyle = '#8b949e';
-  ctx.fillStyle = '#8b949e';
-  (graph.edges || []).forEach(edge => {
-    const start = getPos(edge.start);
-    const end = getPos(edge.end);
-    drawArrow(start, end);
-    if (edge.qos) {
-      const midX = (start.x + end.x) / 2;
-      const midY = (start.y + end.y) / 2;
-      ctx.save();
-      ctx.fillStyle = '#9e6ffe';
-      ctx.font = '11px monospace';
-      ctx.fillText(edge.qos, midX + 4, midY - 2);
-      ctx.restore();
+  const scaler = createGraphvizScaler(layout, width, height);
+  if (!scaler) {
+    ctx.save();
+    ctx.fillStyle = '#c9d1d9';
+    ctx.font = '16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Failed to scale Graphviz layout', width / 2, height / 2);
+    ctx.restore();
+    return;
+  }
+
+  const nodeGeometry = {};
+  const missing = [];
+  const expectedNames = [...nodeNames, ...topicNames];
+  expectedNames.forEach(name => {
+    const nodeInfo = layout.nodes[name];
+    if (!nodeInfo) {
+      missing.push(name);
+      return;
     }
+
+    const center = scaler.toCanvas(nodeInfo);
+    const labelLines = decodeGraphvizLabel(nodeInfo.rawLabel, nodeInfo.label || name, name);
+    const metrics = measureLabel(labelLines);
+
+    const baseWidthPx = Number.isFinite(nodeInfo.width) ? scaler.scaleLength(nodeInfo.width) : 0;
+    const baseHeightPx = Number.isFinite(nodeInfo.height) ? scaler.scaleLength(nodeInfo.height) : 0;
+    const fallbackWidthPx = Math.max(metrics.width + 12, 24);
+    const fallbackHeightPx = Math.max(metrics.height + 12, 24);
+
+    const finalWidthPx = baseWidthPx > 0 ? baseWidthPx : fallbackWidthPx;
+    const finalHeightPx = baseHeightPx > 0 ? baseHeightPx : fallbackHeightPx;
+
+    const availableWidth = Math.max(finalWidthPx - 8, 4);
+    const availableHeight = Math.max(finalHeightPx - 8, 4);
+    const widthScale = metrics.width > 0 ? availableWidth / metrics.width : 1;
+    const heightScale = metrics.height > 0 ? availableHeight / metrics.height : 1;
+    const fontScale = Math.min(1, widthScale, heightScale);
+
+    const fontSize = BASE_FONT_SIZE * fontScale;
+    const lineHeight = (metrics.lineHeight || BASE_LINE_HEIGHT) * fontScale;
+    const textWidth = metrics.width * fontScale;
+    const paddingX = Math.max((finalWidthPx - textWidth) / 2, 4);
+
+    nodeGeometry[name] = {
+      center,
+      width: finalWidthPx,
+      height: finalHeightPx,
+      info: nodeInfo,
+      labelLines,
+      fontSize,
+      lineHeight,
+      paddingX,
+    };
   });
 
-  nodeNames.forEach(name => drawNode(name, positions[name], '#58a6ff'));
-  topicNames.forEach(name => drawTopic(name, positions[name], '#3fb950'));
+  if (missing.length) {
+    ctx.save();
+    ctx.fillStyle = '#c9d1d9';
+    ctx.font = '16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Layout missing nodes: ' + missing.slice(0, 3).join(', '), width / 2, height / 2);
+    ctx.restore();
+    return;
+  }
+
+  const edgeLookup = buildGraphvizEdgeLookup(layout, scaler);
+
+  applySpreadAdjustment(nodeGeometry, edgeLookup);
+
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = '#1f2328';
+  ctx.fillStyle = '#1f2328';
+
+  const edgeUsage = new Map();
+  (graph.edges || []).forEach(edge => {
+    const key = edge.start + '->' + edge.end;
+    let points = null;
+    if (edgeLookup && edgeLookup.has(key)) {
+      const variants = edgeLookup.get(key);
+      const idx = edgeUsage.get(key) ?? 0;
+      points = variants[Math.min(idx, variants.length - 1)];
+      edgeUsage.set(key, idx + 1);
+    }
+    if (!points) {
+      const start = nodeGeometry[edge.start]?.center;
+      const end = nodeGeometry[edge.end]?.center;
+      if (start && end) {
+        points = [start, end];
+      }
+    }
+    if (!points || points.length < 2) {
+      points = [
+        { x: width / 2, y: height / 2 },
+        { x: width / 2, y: height / 2 },
+      ];
+    }
+    drawEdgeWithPath(points);
+  });
+
+  nodeNames.forEach(name => drawNode(name, nodeGeometry[name]));
+  topicNames.forEach(name => drawTopic(name, nodeGeometry[name]));
 }
 
-function drawArrow(start, end) {
+function drawEdgeWithPath(points) {
+  if (!points || points.length < 2) {
+    return;
+  }
+  ctx.save();
+  ctx.strokeStyle = '#1f2328';
+  ctx.fillStyle = '#1f2328';
+  drawSmoothPolyline(points);
+  drawArrowHead(points[points.length - 2], points[points.length - 1]);
+  ctx.restore();
+}
+
+function drawSmoothPolyline(points) {
   ctx.beginPath();
-  ctx.moveTo(start.x, start.y);
-  ctx.lineTo(end.x, end.y);
+  ctx.moveTo(points[0].x, points[0].y);
+  if (points.length === 2) {
+    ctx.lineTo(points[1].x, points[1].y);
+    ctx.stroke();
+    return;
+  }
+
+  let drewBezier = false;
+  for (let i = 1; i + 2 < points.length; i += 3) {
+    const cp1 = points[i];
+    const cp2 = points[i + 1];
+    const end = points[i + 2];
+    ctx.bezierCurveTo(cp1.x, cp1.y, cp2.x, cp2.y, end.x, end.y);
+    drewBezier = true;
+  }
+
+  if (!drewBezier) {
+    ctx.lineTo(points[points.length - 1].x, points[points.length - 1].y);
+  }
+
   ctx.stroke();
+}
+
+function drawArrowHead(start, end) {
+  if (!start || !end) {
+    return;
+  }
   const angle = Math.atan2(end.y - start.y, end.x - start.x);
   const headLen = 9;
   ctx.beginPath();
   ctx.moveTo(end.x, end.y);
-  ctx.lineTo(end.x - headLen * Math.cos(angle - Math.PI / 6), end.y - headLen * Math.sin(angle - Math.PI / 6));
-  ctx.lineTo(end.x - headLen * Math.cos(angle + Math.PI / 6), end.y - headLen * Math.sin(angle + Math.PI / 6));
+  ctx.lineTo(
+    end.x - headLen * Math.cos(angle - Math.PI / 6),
+    end.y - headLen * Math.sin(angle - Math.PI / 6),
+  );
+  ctx.lineTo(
+    end.x - headLen * Math.cos(angle + Math.PI / 6),
+    end.y - headLen * Math.sin(angle + Math.PI / 6),
+  );
   ctx.closePath();
   ctx.fill();
 }
 
-function drawNode(name, pos, color) {
+function decodeGraphvizLabel(rawLabel, fallbackText, nodeName) {
+  const lines = [];
+  const text = rawLabel && rawLabel.length ? rawLabel : fallbackText ?? '';
+  if (!text) {
+    return [{ text: '', align: 'center' }];
+  }
+
+  let buffer = '';
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '\\' && i + 1 < text.length) {
+      const code = text[i + 1];
+      if (code === 'n' || code === 'l' || code === 'r') {
+        const align = code === 'l' ? 'left' : code === 'r' ? 'right' : 'center';
+        lines.push({ text: buffer, align });
+        buffer = '';
+        i += 2;
+        continue;
+      }
+      if (code === 'N') {
+        buffer += nodeName ?? '';
+        i += 2;
+        continue;
+      }
+      if (code === '\\') {
+        buffer += '\\';
+        i += 2;
+        continue;
+      }
+    }
+    buffer += ch;
+    i += 1;
+  }
+  lines.push({ text: buffer, align: 'center' });
+
+  if (!lines.length) {
+    return [{ text: fallbackText ?? '', align: 'center' }];
+  }
+  return lines;
+}
+
+function measureLabel(lines, fontSize = BASE_FONT_SIZE) {
   ctx.save();
-  ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.arc(pos.x, pos.y, 14, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.font = `${fontSize}px ${BASE_FONT_FAMILY}`;
+  let maxWidth = 0;
+  lines.forEach(line => {
+    const metrics = ctx.measureText(line.text);
+    maxWidth = Math.max(maxWidth, metrics.width);
+  });
+  ctx.restore();
+  const lineHeight = (fontSize / BASE_FONT_SIZE) * BASE_LINE_HEIGHT;
+  const height = Math.max(lines.length * lineHeight, lineHeight);
+  return { width: maxWidth, height, lineHeight };
+}
+
+function drawGraphvizLabel(lines, center, boxWidth, options) {
+  const fontSize = options.fontSize || BASE_FONT_SIZE;
+  const lineHeight = options.lineHeight || (fontSize / BASE_FONT_SIZE) * BASE_LINE_HEIGHT;
+  const paddingX = options.paddingX;
+  ctx.save();
+  ctx.font = `${fontSize}px ${BASE_FONT_FAMILY}`;
   ctx.fillStyle = '#0d1117';
-  ctx.font = '11px sans-serif';
-  ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(clipLabel(name), pos.x, pos.y - 18);
+  const effectiveLineHeight = lineHeight;
+  const totalHeight = Math.max(lines.length * effectiveLineHeight, effectiveLineHeight);
+  const halfBoxWidth = boxWidth / 2;
+  const rawPadding = Number.isFinite(paddingX) ? paddingX : 6;
+  const innerPadding = Math.min(Math.max(rawPadding, 4), boxWidth / 2);
+  const leftX = center.x - halfBoxWidth + innerPadding;
+  const rightX = center.x + halfBoxWidth - innerPadding;
+  lines.forEach((line, idx) => {
+    const y = center.y - totalHeight / 2 + effectiveLineHeight * idx + effectiveLineHeight / 2;
+    if (line.align === 'left') {
+      ctx.textAlign = 'left';
+      ctx.fillText(line.text, leftX, y);
+    } else if (line.align === 'right') {
+      ctx.textAlign = 'right';
+      ctx.fillText(line.text, rightX, y);
+    } else {
+      ctx.textAlign = 'center';
+      ctx.fillText(line.text, center.x, y);
+    }
+  });
   ctx.restore();
 }
 
-function drawTopic(name, pos, color) {
+function drawNode(name, geometry) {
+  if (!geometry) {
+    return;
+  }
+  const { center, width, height, info, labelLines, fontSize, lineHeight, paddingX } = geometry;
+  const rx = Math.max(width / 2, 4);
+  const ry = Math.max(height / 2, 4);
   ctx.save();
-  ctx.fillStyle = color;
-  ctx.fillRect(pos.x - 18, pos.y - 12, 36, 24);
-  ctx.fillStyle = '#0d1117';
-  ctx.font = '11px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(clipLabel(name), pos.x, pos.y - 18);
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = info.strokeColor || '#1f2328';
+  const fill =
+    info.fillColor && info.fillColor !== 'none'
+      ? info.fillColor
+      : '#9ebaff';
+  ctx.fillStyle = fill;
+  ctx.beginPath();
+  ctx.ellipse(center.x, center.y, rx, ry, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  drawGraphvizLabel(labelLines, center, width, { fontSize, lineHeight, paddingX });
+  ctx.restore();
+}
+
+function drawTopic(name, geometry) {
+  if (!geometry) {
+    return;
+  }
+  const { center, width, height, info, labelLines, fontSize, lineHeight, paddingX } = geometry;
+  const boxWidth = Math.max(width, 12);
+  const boxHeight = Math.max(height, 12);
+  ctx.save();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = info.strokeColor || '#1f2328';
+  const fill =
+    info.fillColor && info.fillColor !== 'none'
+      ? info.fillColor
+      : '#b8e1b3';
+  ctx.fillStyle = fill;
+  const x = center.x - boxWidth / 2;
+  const y = center.y - boxHeight / 2;
+  const radius = Math.min(12, Math.min(boxWidth, boxHeight) / 4);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + boxWidth - radius, y);
+  ctx.quadraticCurveTo(x + boxWidth, y, x + boxWidth, y + radius);
+  ctx.lineTo(x + boxWidth, y + boxHeight - radius);
+  ctx.quadraticCurveTo(x + boxWidth, y + boxHeight, x + boxWidth - radius, y + boxHeight);
+  ctx.lineTo(x + radius, y + boxHeight);
+  ctx.quadraticCurveTo(x, y + boxHeight, x, y + boxHeight - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  drawGraphvizLabel(labelLines, center, boxWidth, { fontSize, lineHeight, paddingX });
   ctx.restore();
 }
 
@@ -130,10 +639,12 @@ async function fetchGraph() {
     const nodes = graph.nodes?.length ?? 0;
     const topics = Object.keys(graph.topics || {}).length;
     const edges = graph.edges?.length ?? 0;
+    const layoutEngine = graph.graphviz?.engine ? 'graphviz/' + graph.graphviz.engine : 'unavailable';
     metaEl.textContent =
       'nodes: ' + nodes +
       ' | topics: ' + topics +
       ' | edges: ' + edges +
+      ' | layout: ' + layoutEngine +
       ' | fingerprint: ' + payload.fingerprint;
     statusEl.textContent = 'Last update: ' + new Date(payload.generated_at * 1000).toLocaleTimeString();
     renderGraph(graph);

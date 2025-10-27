@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -27,6 +29,8 @@ class GraphWebServer:
         self._lock = threading.Lock()
         self._latest_payload: Optional[str] = None
         self._server = _ThreadingHTTPServer((host, port), self._create_handler())
+        self._dot_path = shutil.which('dot')
+        self._graphviz_warning_logged = False
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._running = False
 
@@ -69,10 +73,17 @@ class GraphWebServer:
         self._running = False
 
     def publish(self, snapshot: 'GraphSnapshot', fingerprint: str) -> None:
+        graph_dict = snapshot.to_dict()
+        plain_layout = self._compute_graphviz_plain(snapshot)
+        if plain_layout is not None:
+            graph_dict['graphviz'] = {
+                'engine': 'dot',
+                'plain': plain_layout,
+            }
         payload = {
             'fingerprint': fingerprint,
             'generated_at': time.time(),
-            'graph': snapshot.to_dict(),
+            'graph': graph_dict,
         }
         payload_json = json.dumps(payload, separators=(',', ':'))
         with self._lock:
@@ -123,6 +134,40 @@ class GraphWebServer:
         handler.send_header('Cache-Control', 'no-cache')
         handler.end_headers()
         handler.wfile.write(b'ok')
+
+    def _compute_graphviz_plain(self, snapshot: 'GraphSnapshot') -> Optional[str]:
+        if not self._dot_path:
+            if not self._graphviz_warning_logged:
+                self._logger.warning(
+                    'Graphviz "dot" executable not found; web UI layout will be unavailable'
+                )
+                self._graphviz_warning_logged = True
+            return None
+
+        try:
+            completed = subprocess.run(
+                [self._dot_path, '-Tplain'],
+                input=snapshot.to_dot(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+                text=True,
+                encoding='utf-8',
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            if not self._graphviz_warning_logged:
+                details = ''
+                if isinstance(exc, subprocess.CalledProcessError):
+                    stderr_output = exc.stderr.strip()
+                    if stderr_output:
+                        details = f' ({stderr_output})'
+                self._logger.warning(
+                    'Graphviz layout failed; web UI layout will be unavailable%s', details
+                )
+                self._graphviz_warning_logged = True
+            return None
+
+        return completed.stdout
 
 
 STATIC_FILES: Dict[str, Tuple[str, str]] = {
