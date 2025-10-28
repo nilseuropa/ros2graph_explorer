@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
@@ -58,28 +59,86 @@ class GraphSnapshot:
         return json.dumps(self.to_dict(), indent=2, sort_keys=True)
 
     def to_dot(self) -> str:
-        """Return GraphViz DOT source."""
+        """Return GraphViz DOT source with additional layout hints."""
+        node_publish_topics: Dict[str, Set[str]] = defaultdict(set)
+        node_subscribe_topics: Dict[str, Set[str]] = defaultdict(set)
+        topic_publishers: Dict[str, Set[str]] = defaultdict(set)
+        topic_subscribers: Dict[str, Set[str]] = defaultdict(set)
+
+        for edge in self.edges:
+            if edge.start in self.nodes and edge.end in self.topics:
+                node_publish_topics[edge.start].add(edge.end)
+                topic_publishers[edge.end].add(edge.start)
+            elif edge.start in self.topics and edge.end in self.nodes:
+                node_subscribe_topics[edge.end].add(edge.start)
+                topic_subscribers[edge.start].add(edge.end)
+
+        source_nodes = sorted(
+            node
+            for node in self.nodes
+            if node_publish_topics[node] and not node_subscribe_topics[node]
+        )
+        sink_nodes = sorted(
+            node
+            for node in self.nodes
+            if node_subscribe_topics[node] and not node_publish_topics[node]
+        )
+        topic_names = sorted(self.topics.keys())
+
         lines: List[str] = [
             'digraph ros2_graph {',
             '  rankdir=LR;',
-            '  graph [splines=true, overlap=false];',
+            '  graph [splines=ortho, overlap=false, ranksep=1.2, nodesep=0.8];',
+            '  node [fontsize=14];',
+            '  edge [fontsize=12];',
         ]
 
         for node in sorted(self.nodes):
             lines.append(f'  "{node}" [shape=ellipse];')
 
-        for topic, types in sorted(self.topics.items()):
+        for topic in topic_names:
+            types = self.topics[topic]
             type_label = '\\n'.join(types)
             label = topic if not type_label else f'{topic}\\n{type_label}'
             safe_label = label.replace('"', '\\"')
             lines.append(f'  "{topic}" [shape=box,style=rounded,label="{safe_label}"];')
 
+        if source_nodes:
+            quoted = ' '.join(f'"{node}"' for node in source_nodes)
+            lines.append(f'  {{ rank = min; {quoted}; }}')
+
+        if sink_nodes:
+            quoted = ' '.join(f'"{node}"' for node in sink_nodes)
+            lines.append(f'  {{ rank = max; {quoted}; }}')
+
+        if topic_names:
+            quoted = ' '.join(f'"{topic}"' for topic in topic_names)
+            lines.append(f'  {{ rank = same; {quoted}; }}')
+
+        for topic in topic_names:
+            publishers = sorted(topic_publishers.get(topic, []))
+            subscribers = sorted(topic_subscribers.get(topic, []))
+            for first, second in zip(publishers, publishers[1:]):
+                lines.append(
+                    f'  "{first}" -> "{second}" [style=invis, weight=1.5, constraint=true];'
+                )
+            for first, second in zip(subscribers, subscribers[1:]):
+                lines.append(
+                    f'  "{first}" -> "{second}" [style=invis, weight=1.5, constraint=true];'
+                )
+            if publishers and subscribers:
+                lines.append(
+                    f'  "{publishers[-1]}" -> "{subscribers[0]}" '
+                    '[style=invis, weight=0.5, constraint=true];'
+                )
+
         for edge in self.edges:
-            label = ''
+            attributes: List[str] = ['weight=2']
             if edge.qos_label:
                 safe_qos = edge.qos_label.replace('"', '\\"')
-                label = f' [label="{safe_qos}"]'
-            lines.append(f'  "{edge.start}" -> "{edge.end}"{label};')
+                attributes.append(f'label="{safe_qos}"')
+            attr_str = f" [{', '.join(attributes)}]" if attributes else ''
+            lines.append(f'  "{edge.start}" -> "{edge.end}"{attr_str};')
 
         lines.append('}')
         return '\n'.join(lines)
