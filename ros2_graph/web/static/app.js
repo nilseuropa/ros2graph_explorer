@@ -17,6 +17,11 @@ const BASE_STROKE_WIDTH = 1.5;
 const MIN_STROKE_WIDTH = 0.75;
 const MAX_STROKE_WIDTH = 2.5;
 const DESIRED_LABEL_SCALE = 1.0;
+const HIGHLIGHT_EDGE_COLOR = '#ff9800';
+const HIGHLIGHT_NODE_STROKE = '#ff9800';
+const HIGHLIGHT_NODE_FILL = '#ffe6bf';
+const HIGHLIGHT_TOPIC_STROKE = '#ff9800';
+const HIGHLIGHT_TOPIC_FILL = '#d8f5d0';
 const MIN_ARROW_HEAD = 4;
 const MAX_ARROW_HEAD = 18;
 let userAdjustedView = false;
@@ -25,6 +30,15 @@ const panState = {
   pointerId: null,
   lastX: 0,
   lastY: 0,
+};
+let currentScene = {
+  nodes: new Map(),
+  edges: [],
+};
+let currentHighlight = {
+  key: '',
+  nodes: new Set(),
+  edges: new Set(),
 };
 const BASE_FONT_FAMILY = '"Times New Roman", serif';
 const BASE_FONT_SIZE = 14;
@@ -38,6 +52,44 @@ function resetViewState() {
 }
 
 resetViewState();
+
+function toGraphSpace(point) {
+  const scale = viewState.scale || 1;
+  return {
+    x: (point.x - viewState.offsetX) / scale,
+    y: (point.y - viewState.offsetY) / scale,
+  };
+}
+
+function makeHighlightKey(nodes, edges) {
+  const nodeKey = nodes.length ? nodes.slice().sort().join('|') : '';
+  const edgeKey = edges.length ? edges.slice().sort().join('|') : '';
+  return nodeKey + '||' + edgeKey;
+}
+
+function updateHighlight(highlight) {
+  const nodes = highlight?.nodes ? Array.from(highlight.nodes) : [];
+  const edges = highlight?.edges ? Array.from(highlight.edges) : [];
+  const key = makeHighlightKey(nodes, edges);
+  if (key === currentHighlight.key) {
+    return;
+  }
+  currentHighlight = {
+    key,
+    nodes: new Set(nodes),
+    edges: new Set(edges),
+  };
+  if (lastGraph) {
+    renderGraph(lastGraph, lastFingerprint);
+  }
+}
+
+function clearHoverHighlight() {
+  if (currentHighlight.key === '') {
+    return;
+  }
+  updateHighlight(null);
+}
 
 function stripQuotes(value) {
   if (!value) {
@@ -396,6 +448,140 @@ function buildOrthogonalPath(tailGeometry, headGeometry) {
   return points;
 }
 
+function isPointInsideGeometry(geometry, point) {
+  if (!geometry || !point) {
+    return false;
+  }
+  const tolerance = 6 / (viewState.scale || 1);
+  const center = geometry.center;
+  if (!center) {
+    return false;
+  }
+  if (isRectangularShape(geometry)) {
+    const halfWidth = Math.max(geometry.width / 2, 1) + tolerance;
+    const halfHeight = Math.max(geometry.height / 2, 1) + tolerance;
+    const dx = Math.abs(point.x - center.x);
+    const dy = Math.abs(point.y - center.y);
+    return dx <= halfWidth && dy <= halfHeight;
+  }
+  const rx = Math.max(geometry.width / 2, 1) + tolerance;
+  const ry = Math.max(geometry.height / 2, 1) + tolerance;
+  const dx = point.x - center.x;
+  const dy = point.y - center.y;
+  return (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) <= 1;
+}
+
+function distancePointToSegment(point, a, b) {
+  const vx = b.x - a.x;
+  const vy = b.y - a.y;
+  const wx = point.x - a.x;
+  const wy = point.y - a.y;
+  const segmentLengthSquared = vx * vx + vy * vy;
+  let t = 0;
+  if (segmentLengthSquared > 0) {
+    t = (wx * vx + wy * vy) / segmentLengthSquared;
+    t = Math.max(0, Math.min(1, t));
+  }
+  const projX = a.x + vx * t;
+  const projY = a.y + vy * t;
+  return Math.hypot(point.x - projX, point.y - projY);
+}
+
+function findNodeAt(point) {
+  if (!currentScene.nodes || !currentScene.nodes.size) {
+    return null;
+  }
+  for (const [name, geometry] of currentScene.nodes.entries()) {
+    if (isPointInsideGeometry(geometry, point)) {
+      return { name, geometry };
+    }
+  }
+  return null;
+}
+
+function findEdgeAt(point) {
+  if (!currentScene.edges || !currentScene.edges.length) {
+    return null;
+  }
+  const threshold = 8 / (viewState.scale || 1);
+  let best = null;
+  let bestDistance = Infinity;
+  currentScene.edges.forEach(edge => {
+    const pts = edge.points;
+    if (!pts || pts.length < 2) {
+      return;
+    }
+    for (let i = 1; i < pts.length; i += 1) {
+      const distance = distancePointToSegment(point, pts[i - 1], pts[i]);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = edge;
+      }
+    }
+  });
+  if (best && bestDistance <= threshold) {
+    return best;
+  }
+  return null;
+}
+
+function computeNodeHoverHighlight(name, geometry) {
+  const nodes = new Set([name]);
+  const edges = new Set();
+  if (!currentScene.edges) {
+    return { nodes, edges };
+  }
+  currentScene.edges.forEach(edge => {
+    if (edge.start === name || edge.end === name) {
+      edges.add(edge.id);
+      const other = edge.start === name ? edge.end : edge.start;
+      const otherGeom = currentScene.nodes.get(other);
+      if (!otherGeom) {
+        return;
+      }
+      if (geometry?.type === 'node') {
+        if (otherGeom.type === 'topic') {
+          nodes.add(other);
+        }
+      } else if (geometry?.type === 'topic') {
+        nodes.add(other);
+      } else {
+        nodes.add(other);
+      }
+    }
+  });
+  return { nodes, edges };
+}
+
+function computeEdgeHoverHighlight(edge) {
+  const nodes = new Set();
+  nodes.add(edge.start);
+  nodes.add(edge.end);
+  const edges = new Set([edge.id]);
+  return { nodes, edges };
+}
+
+function updateHoverHighlight(event) {
+  if (!lastGraph || panState.active) {
+    return;
+  }
+  const canvasPoint = getCanvasPoint(event);
+  const graphPoint = toGraphSpace(canvasPoint);
+  const nodeHit = findNodeAt(graphPoint);
+  if (nodeHit) {
+    const highlight = computeNodeHoverHighlight(nodeHit.name, nodeHit.geometry);
+    updateHighlight(highlight);
+    return;
+  }
+  const edgeHit = findEdgeAt(graphPoint);
+  if (edgeHit) {
+    const highlight = computeEdgeHoverHighlight(edgeHit);
+    updateHighlight(highlight);
+    return;
+  }
+  clearHoverHighlight();
+}
+
 function clamp(value, min, max) {
   if (value < min) {
     return min;
@@ -538,6 +724,10 @@ function renderGraph(graph, fingerprint = lastFingerprint) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.restore();
   if (!graph) {
+    currentScene = {
+      nodes: new Map(),
+      edges: [],
+    };
     return;
   }
 
@@ -555,6 +745,10 @@ function renderGraph(graph, fingerprint = lastFingerprint) {
   const topicNames = Object.keys(graph.topics || {});
 
   if (!graph.graphviz?.plain) {
+    currentScene = {
+      nodes: new Map(),
+      edges: [],
+    };
     ctx.save();
     ctx.fillStyle = '#c9d1d9';
     ctx.font = '16px sans-serif';
@@ -566,6 +760,10 @@ function renderGraph(graph, fingerprint = lastFingerprint) {
 
   const layout = parseGraphvizPlain(graph.graphviz.plain);
   if (!layout) {
+    currentScene = {
+      nodes: new Map(),
+      edges: [],
+    };
     ctx.save();
     ctx.fillStyle = '#c9d1d9';
     ctx.font = '16px sans-serif';
@@ -577,6 +775,10 @@ function renderGraph(graph, fingerprint = lastFingerprint) {
 
   const scaler = createGraphvizScaler(layout, width, height);
   if (!scaler) {
+    currentScene = {
+      nodes: new Map(),
+      edges: [],
+    };
     ctx.save();
     ctx.fillStyle = '#c9d1d9';
     ctx.font = '16px sans-serif';
@@ -641,6 +843,10 @@ function renderGraph(graph, fingerprint = lastFingerprint) {
   });
 
   if (missing.length) {
+    currentScene = {
+      nodes: new Map(),
+      edges: [],
+    };
     ctx.save();
     ctx.fillStyle = '#c9d1d9';
     ctx.font = '16px sans-serif';
@@ -702,17 +908,17 @@ function renderGraph(graph, fingerprint = lastFingerprint) {
   ctx.fillStyle = '#1f2328';
 
   const edgeUsage = new Map();
+  const sceneEdges = [];
   (graph.edges || []).forEach(edge => {
+    const key = edge.start + '->' + edge.end;
+    const idx = edgeUsage.get(key) ?? 0;
     const tailGeom = nodeGeometry[edge.start];
     const headGeom = nodeGeometry[edge.end];
     let points = buildOrthogonalPath(tailGeom, headGeom);
     if (!points || points.length < 2) {
-      const key = edge.start + '->' + edge.end;
       if (edgeLookup && edgeLookup.has(key)) {
         const variants = edgeLookup.get(key);
-        const idx = edgeUsage.get(key) ?? 0;
         points = variants[Math.min(idx, variants.length - 1)];
-        edgeUsage.set(key, idx + 1);
       }
       if (!points) {
         const start = nodeGeometry[edge.start]?.center;
@@ -729,12 +935,30 @@ function renderGraph(graph, fingerprint = lastFingerprint) {
       }
       points = adjustEdgePath(points, tailGeom, headGeom);
     }
-    drawEdgeWithPath(points);
+    edgeUsage.set(key, idx + 1);
+    const edgeId = key + '#' + idx;
+    const storedPoints = points.map(pt => ({ x: pt.x, y: pt.y }));
+    const edgeHighlighted =
+      currentHighlight.edges.has(edgeId) ||
+      (currentHighlight.nodes.has(edge.start) && currentHighlight.nodes.has(edge.end));
+    sceneEdges.push({
+      id: edgeId,
+      start: edge.start,
+      end: edge.end,
+      points: storedPoints,
+    });
+    drawEdgeWithPath(points, edgeHighlighted);
   });
 
-  nodeNames.forEach(name => drawNode(name, nodeGeometry[name]));
-  topicNames.forEach(name => drawTopic(name, nodeGeometry[name]));
+  nodeNames.forEach(name => drawNode(name, nodeGeometry[name], currentHighlight.nodes.has(name)));
+  topicNames.forEach(name => drawTopic(name, nodeGeometry[name], currentHighlight.nodes.has(name)));
   ctx.restore();
+
+  const nodesMap = new Map(Object.entries(nodeGeometry));
+  currentScene = {
+    nodes: nodesMap,
+    edges: sceneEdges,
+  };
 }
 
 function handleWheel(event) {
@@ -759,6 +983,7 @@ function handleWheel(event) {
   viewState.offsetY = point.y - baseY * targetScale;
   userAdjustedView = true;
   renderGraph(lastGraph, lastFingerprint);
+  updateHoverHighlight(event);
 }
 
 function handlePointerDown(event) {
@@ -772,6 +997,7 @@ function handlePointerDown(event) {
   panState.lastX = point.x;
   panState.lastY = point.y;
   userAdjustedView = true;
+  clearHoverHighlight();
   try {
     canvas.setPointerCapture(event.pointerId);
   } catch (err) {
@@ -780,21 +1006,25 @@ function handlePointerDown(event) {
 }
 
 function handlePointerMove(event) {
-  if (!panState.active || event.pointerId !== panState.pointerId || !lastGraph) {
+  if (!lastGraph) {
     return;
   }
-  event.preventDefault();
-  const point = getCanvasPoint(event);
-  const dx = point.x - panState.lastX;
-  const dy = point.y - panState.lastY;
-  if (dx === 0 && dy === 0) {
+  if (panState.active && event.pointerId === panState.pointerId) {
+    event.preventDefault();
+    const point = getCanvasPoint(event);
+    const dx = point.x - panState.lastX;
+    const dy = point.y - panState.lastY;
+    if (dx === 0 && dy === 0) {
+      return;
+    }
+    panState.lastX = point.x;
+    panState.lastY = point.y;
+    viewState.offsetX += dx;
+    viewState.offsetY += dy;
+    renderGraph(lastGraph, lastFingerprint);
     return;
   }
-  panState.lastX = point.x;
-  panState.lastY = point.y;
-  viewState.offsetX += dx;
-  viewState.offsetY += dy;
-  renderGraph(lastGraph, lastFingerprint);
+  updateHoverHighlight(event);
 }
 
 function endPan(pointerId) {
@@ -815,20 +1045,29 @@ function handlePointerUp(event) {
     event.preventDefault();
   }
   endPan(event.pointerId);
+  updateHoverHighlight(event);
 }
 
 function handlePointerCancel(event) {
   endPan(event.pointerId);
+  clearHoverHighlight();
 }
 
-function drawEdgeWithPath(points) {
+function drawEdgeWithPath(points, highlighted) {
   if (!points || points.length < 2) {
     return;
   }
   ctx.save();
-  ctx.strokeStyle = '#1f2328';
-  ctx.fillStyle = '#1f2328';
-  ctx.lineWidth = getStrokeWidth();
+  const baseStroke = getStrokeWidth();
+  if (highlighted) {
+    ctx.strokeStyle = HIGHLIGHT_EDGE_COLOR;
+    ctx.fillStyle = HIGHLIGHT_EDGE_COLOR;
+    ctx.lineWidth = Math.min(MAX_STROKE_WIDTH * 1.8, baseStroke * 1.8 + 1);
+  } else {
+    ctx.strokeStyle = '#1f2328';
+    ctx.fillStyle = '#1f2328';
+    ctx.lineWidth = baseStroke;
+  }
   drawPolyline(points);
   drawArrowHead(points[points.length - 2], points[points.length - 1]);
   ctx.restore();
@@ -951,7 +1190,7 @@ function drawGraphvizLabel(lines, center, boxWidth, options) {
   ctx.restore();
 }
 
-function drawNode(name, geometry) {
+function drawNode(name, geometry, highlighted) {
   if (!geometry) {
     return;
   }
@@ -959,13 +1198,20 @@ function drawNode(name, geometry) {
   const rx = Math.max(width / 2, 4);
   const ry = Math.max(height / 2, 4);
   ctx.save();
-  ctx.lineWidth = getStrokeWidth();
-  ctx.strokeStyle = info.strokeColor || '#1f2328';
-  const fill =
-    info.fillColor && info.fillColor !== 'none'
-      ? info.fillColor
-      : '#9ebaff';
-  ctx.fillStyle = fill;
+  const baseStroke = getStrokeWidth();
+  if (highlighted) {
+    ctx.lineWidth = Math.min(MAX_STROKE_WIDTH * 1.6, baseStroke * 1.6 + 1);
+    ctx.strokeStyle = HIGHLIGHT_NODE_STROKE;
+    ctx.fillStyle = HIGHLIGHT_NODE_FILL;
+  } else {
+    ctx.lineWidth = baseStroke;
+    ctx.strokeStyle = info.strokeColor || '#1f2328';
+    const fill =
+      info.fillColor && info.fillColor !== 'none'
+        ? info.fillColor
+        : '#9ebaff';
+    ctx.fillStyle = fill;
+  }
   ctx.beginPath();
   ctx.ellipse(center.x, center.y, rx, ry, 0, 0, Math.PI * 2);
   ctx.fill();
@@ -974,7 +1220,7 @@ function drawNode(name, geometry) {
   ctx.restore();
 }
 
-function drawTopic(name, geometry) {
+function drawTopic(name, geometry, highlighted) {
   if (!geometry) {
     return;
   }
@@ -982,13 +1228,20 @@ function drawTopic(name, geometry) {
   const boxWidth = Math.max(width, 12);
   const boxHeight = Math.max(height, 12);
   ctx.save();
-  ctx.lineWidth = getStrokeWidth();
-  ctx.strokeStyle = info.strokeColor || '#1f2328';
-  const fill =
-    info.fillColor && info.fillColor !== 'none'
-      ? info.fillColor
-      : '#b8e1b3';
-  ctx.fillStyle = fill;
+  const baseStroke = getStrokeWidth();
+  if (highlighted) {
+    ctx.lineWidth = Math.min(MAX_STROKE_WIDTH * 1.6, baseStroke * 1.6 + 1);
+    ctx.strokeStyle = HIGHLIGHT_TOPIC_STROKE;
+    ctx.fillStyle = HIGHLIGHT_TOPIC_FILL;
+  } else {
+    ctx.lineWidth = baseStroke;
+    ctx.strokeStyle = info.strokeColor || '#1f2328';
+    const fill =
+      info.fillColor && info.fillColor !== 'none'
+        ? info.fillColor
+        : '#b8e1b3';
+    ctx.fillStyle = fill;
+  }
   const x = center.x - boxWidth / 2;
   const y = center.y - boxHeight / 2;
   const radius = Math.min(12, Math.min(boxWidth, boxHeight) / 4);
