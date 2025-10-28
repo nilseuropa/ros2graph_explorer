@@ -744,6 +744,15 @@ canvas.addEventListener('pointerup', handlePointerUp);
 canvas.addEventListener('pointercancel', handlePointerCancel);
 canvas.addEventListener('pointerleave', handlePointerCancel);
 
+const HIDDEN_NAME_PATTERNS = [/\/rosout\b/i];
+
+function isHiddenGraphName(name) {
+  if (!name) {
+    return false;
+  }
+  return HIDDEN_NAME_PATTERNS.some(pattern => pattern.test(name));
+}
+
 function renderGraph(graph, fingerprint = lastFingerprint) {
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -767,8 +776,8 @@ function renderGraph(graph, fingerprint = lastFingerprint) {
   lastGraph = graph;
   const width = canvas.width;
   const height = canvas.height;
-  const nodeNames = graph.nodes || [];
-  const topicNames = Object.keys(graph.topics || {});
+  const nodeNames = (graph.nodes || []).filter(name => !isHiddenGraphName(name));
+  const topicNames = Object.keys(graph.topics || {}).filter(name => !isHiddenGraphName(name));
 
   if (!graph.graphviz?.plain) {
     currentScene = {
@@ -841,6 +850,9 @@ function renderGraph(graph, fingerprint = lastFingerprint) {
   const topicSet = new Set(topicNames);
   const geometryEntries = [];
   Object.entries(layout.nodes).forEach(([name, nodeInfo]) => {
+    if (isHiddenGraphName(name)) {
+      return;
+    }
     const center = scaler.toCanvas(nodeInfo);
     const labelLines = decodeGraphvizLabel(nodeInfo.rawLabel, nodeInfo.label || name, name);
     const metrics = measureLabel(labelLines);
