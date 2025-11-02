@@ -52,17 +52,126 @@ let hoverHighlight = {
   edges: new Set(),
 };
 let nodeDescriptions = new Map();
+const nodeFeatureInfo = new Map();
 const overlayState = {
   visible: false,
   nodeName: '',
   description: '',
   auto: false,
+  maxWidth: 0,
+  table: null,
+  hoverRow: null,
+  layout: null,
 };
+
+function setOverlayPointerCapture(enabled) {
+  if (!overlayCanvas) {
+    return;
+  }
+  overlayCanvas.style.pointerEvents = enabled ? 'auto' : 'none';
+}
+
+setOverlayPointerCapture(false);
+
+function pointInRect(x, y, rect) {
+  if (!rect) {
+    return false;
+  }
+  return (
+    x >= rect.x &&
+    x <= rect.x + rect.width &&
+    y >= rect.y &&
+    y <= rect.y + rect.height
+  );
+}
+
+function setOverlayHover(nextHover) {
+  const prev = overlayState.hoverRow;
+  const unchanged =
+    (prev === null && nextHover === null) ||
+    (prev &&
+      nextHover &&
+      prev.tableIndex === nextHover.tableIndex &&
+      prev.rowType === nextHover.rowType &&
+      prev.rowIndex === nextHover.rowIndex);
+  if (unchanged) {
+    return;
+  }
+  overlayState.hoverRow = nextHover;
+  if (overlayState.visible && overlayState.table) {
+    refreshOverlay();
+  }
+}
+
+function updateOverlayHoverPosition(x, y) {
+  if (!overlayState.visible || !overlayState.table || !overlayState.layout) {
+    setOverlayHover(null);
+    return;
+  }
+  const { box, tables } = overlayState.layout;
+  if (!box || !pointInRect(x, y, box)) {
+    setOverlayHover(null);
+    return;
+  }
+  let hover = null;
+  if (Array.isArray(tables)) {
+    for (let tableIndex = 0; tableIndex < tables.length; tableIndex += 1) {
+      const info = tables[tableIndex];
+      if (!info) {
+        continue;
+      }
+      if (info.header && pointInRect(x, y, info.header)) {
+        hover = { tableIndex, rowType: 'header', rowIndex: -1 };
+        break;
+      }
+      if (Array.isArray(info.rows)) {
+        for (let rowIndex = 0; rowIndex < info.rows.length; rowIndex += 1) {
+          const rect = info.rows[rowIndex];
+          if (pointInRect(x, y, rect)) {
+            hover = { tableIndex, rowType: 'body', rowIndex };
+            break;
+          }
+        }
+      }
+      if (hover) {
+        break;
+      }
+    }
+  }
+  setOverlayHover(hover);
+}
+
+function handleOverlayPointerMove(event) {
+  if (!overlayCanvas) {
+    return;
+  }
+  const rect = overlayCanvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) {
+    setOverlayHover(null);
+    return;
+  }
+  const scaleX = overlayCanvas.width / rect.width;
+  const scaleY = overlayCanvas.height / rect.height;
+  const x = (event.clientX - rect.left) * scaleX;
+  const y = (event.clientY - rect.top) * scaleY;
+  updateOverlayHoverPosition(x, y);
+}
+
+function handleOverlayPointerLeave() {
+  setOverlayHover(null);
+}
+
+if (overlayCanvas) {
+  overlayCanvas.addEventListener('pointermove', handleOverlayPointerMove);
+  overlayCanvas.addEventListener('pointerleave', handleOverlayPointerLeave);
+  overlayCanvas.addEventListener('pointerdown', handleOverlayPointerDown);
+}
 const contextMenu = document.getElementById('contextMenu');
 const contextMenuState = {
   visible: false,
   target: null,
   position: { x: 0, y: 0 },
+  items: [],
 };
 const canvasContainer = document.getElementById('canvasContainer');
 const BASE_FONT_FAMILY = '"Times New Roman", serif';
@@ -71,12 +180,20 @@ const BASE_LINE_HEIGHT = 18;
 const POINTS_PER_INCH = 72;
 const MIN_FONT_SIZE_PX = 7;
 const BASE_LINE_HEIGHT_RATIO = BASE_LINE_HEIGHT / BASE_FONT_SIZE;
-const OVERLAY_FONT = '13px "Segoe UI", system-ui, -apple-system, sans-serif';
+const OVERLAY_FONT = '14.3px "Segoe UI", system-ui, -apple-system, sans-serif';
 const OVERLAY_LINE_HEIGHT = 18;
 const OVERLAY_PADDING = 12;
 const OVERLAY_MAX_WIDTH = 320;
 const OVERLAY_MARGIN = 12;
 const TOPIC_TOOL_TIMEOUT = 15000;
+const FEATURE_PARAM_ORDER = ['name', 'class', 'version', 'gui_version', 'state'];
+const FEATURE_LABELS = {
+  name: 'Name',
+  class: 'Class',
+  version: 'Version',
+  gui_version: 'GUI Version',
+  state: 'State',
+};
 
 function resetViewState() {
   viewState.scale = 1;
@@ -143,6 +260,57 @@ function formatBytesPerSecond(value) {
   return value.toFixed(0) + ' B/s';
 }
 
+function computeBandwidthValue(frequency, size) {
+  if (!Number.isFinite(frequency) || frequency <= 0) {
+    return null;
+  }
+  if (!Number.isFinite(size) || size <= 0) {
+    return null;
+  }
+  return frequency * size;
+}
+
+function getContextMenuItemsForTarget(target) {
+  if (!target) {
+    return [];
+  }
+  if (target.type === 'topic-edge' || target.type === 'topic-node') {
+    return [
+      { action: 'info', label: 'Info' },
+      { action: 'stats', label: 'Stats' },
+    ];
+  }
+  if (target.type === 'node') {
+    return [
+      { action: 'info', label: 'Info' },
+      { action: 'services', label: 'Services' },
+      { action: 'parameters', label: 'Parameters' },
+    ];
+  }
+  return [];
+}
+
+function configureContextMenu(target) {
+  if (!contextMenu) {
+    return false;
+  }
+  const items = getContextMenuItemsForTarget(target);
+  if (!items.length) {
+    contextMenuState.items = [];
+    return false;
+  }
+  contextMenu.innerHTML = '';
+  items.forEach(item => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.action = item.action;
+    button.textContent = item.label;
+    contextMenu.appendChild(button);
+  });
+  contextMenuState.items = items;
+  return true;
+}
+
 function clearOverlayCanvas() {
   overlayCtx.save();
   overlayCtx.setTransform(1, 0, 0, 1, 0, 0);
@@ -150,6 +318,264 @@ function clearOverlayCanvas() {
   overlayCtx.restore();
 }
 
+function drawOverlayTables(anchorPoint, data) {
+  const tables = Array.isArray(data?.tables) ? data.tables.filter(Boolean) : [];
+  const titleLines = Array.isArray(data?.titleLines) ? data.titleLines : [];
+  const layoutInfo = { box: null, tables: [] };
+  if (!tables.length && !titleLines.length) {
+    overlayState.layout = null;
+    return;
+  }
+
+  overlayCtx.save();
+  overlayCtx.setTransform(1, 0, 0, 1, 0, 0);
+  overlayCtx.font = OVERLAY_FONT;
+  overlayCtx.textBaseline = 'middle';
+  overlayCtx.textAlign = 'left';
+
+  const rowHeight = OVERLAY_LINE_HEIGHT;
+  const paddingX = OVERLAY_PADDING;
+  const paddingY = OVERLAY_PADDING;
+  const tableSpacing = rowHeight * 0.8;
+  const tableTitleGap = rowHeight * 0.4;
+  const headerBodyGap = rowHeight * 0.3;
+  const columnSpacing = 24;
+
+  const viewportWidthRaw = typeof window !== 'undefined' ? window.innerWidth : overlayCanvas.width;
+  const viewportWidth = Number.isFinite(viewportWidthRaw) ? viewportWidthRaw : 0;
+  const canvasWidthRaw = overlayCanvas?.width;
+  const canvasWidth = Number.isFinite(canvasWidthRaw) ? canvasWidthRaw : viewportWidth;
+  const containerWidthRaw = canvasContainer?.clientWidth;
+  const containerWidth = Number.isFinite(containerWidthRaw) ? containerWidthRaw : 0;
+  const maxContainerWidth = Math.max(viewportWidth, canvasWidth, containerWidth);
+  const maxAllowedWidth = Math.max(OVERLAY_PADDING * 2 + 160, maxContainerWidth - OVERLAY_MARGIN * 2);
+
+  let maxTitleWidth = 0;
+  titleLines.forEach(line => {
+    const width = overlayCtx.measureText(line).width;
+    if (width > maxTitleWidth) {
+      maxTitleWidth = width;
+    }
+  });
+
+  const processedTables = tables.map(table => {
+    const tableTitle = typeof table.title === 'string' ? table.title : '';
+    const headers = Array.isArray(table.headers) ? table.headers.map(text => text ?? '') : [];
+    const rawRows = Array.isArray(table.rows) ? table.rows : [];
+    const columnCount = headers.length || (rawRows[0] ? rawRows[0].length : 0);
+    const rows = rawRows.map(row => {
+      const arr = [];
+      for (let i = 0; i < columnCount; i += 1) {
+        arr.push(row?.[i] ?? '');
+      }
+      return arr;
+    });
+
+    const columnWidths = new Array(columnCount).fill(0);
+    headers.forEach((text, idx) => {
+      const width = overlayCtx.measureText(text).width;
+      columnWidths[idx] = Math.max(columnWidths[idx], width);
+    });
+    rows.forEach(row => {
+      row.forEach((text, idx) => {
+        const width = overlayCtx.measureText(text).width;
+        if (width > columnWidths[idx]) {
+          columnWidths[idx] = width;
+        }
+      });
+    });
+
+    const tableTitleWidth = tableTitle ? overlayCtx.measureText(tableTitle).width : 0;
+    const rawWidth = columnCount
+      ? columnWidths.reduce((sum, width) => sum + width, 0) + columnSpacing * Math.max(0, columnCount - 1)
+      : 0;
+
+    return {
+      title: tableTitle,
+      headers: headers.length ? headers : new Array(columnCount).fill(''),
+      rows,
+      columnCount,
+      columnWidths,
+      rawWidth,
+      titleWidth: tableTitleWidth,
+      spacing: columnSpacing,
+    };
+  });
+
+  let contentWidth = maxTitleWidth;
+  processedTables.forEach(info => {
+    contentWidth = Math.max(contentWidth, info.titleWidth, info.rawWidth);
+  });
+
+  let boxWidth = Math.max(contentWidth + paddingX * 2, 200);
+  if (boxWidth > maxAllowedWidth) {
+    boxWidth = maxAllowedWidth;
+  }
+
+  const innerWidth = boxWidth - paddingX * 2;
+  processedTables.forEach(info => {
+    if (info.columnCount && info.rawWidth > innerWidth) {
+      const scale = Math.max(0.3, innerWidth / Math.max(info.rawWidth, 1));
+      info.columnWidths = info.columnWidths.map(width => width * scale);
+      info.spacing = info.spacing * scale;
+      info.rawWidth = info.columnWidths.reduce((sum, width) => sum + width, 0) + info.spacing * Math.max(0, info.columnCount - 1);
+    }
+  });
+
+  const titleHeight = titleLines.length ? titleLines.length * rowHeight : 0;
+  const titleGap = tables.length ? Math.max(rowHeight * 0.35, 6) : 0;
+
+  let totalTablesHeight = 0;
+  processedTables.forEach((info, idx) => {
+    if (!info.columnCount) {
+      return;
+    }
+    const tableTitleHeight = info.title ? rowHeight : 0;
+    const preHeaderGap = info.title ? tableTitleGap : 0;
+    const headerHeight = rowHeight;
+    const bodyHeight = info.rows.length * rowHeight;
+    totalTablesHeight += tableTitleHeight + preHeaderGap + headerHeight + headerBodyGap + bodyHeight;
+    if (idx < processedTables.length - 1) {
+      totalTablesHeight += tableSpacing;
+    }
+  });
+  const bottomPadding = processedTables.length ? Math.max(rowHeight * 0.6, 10) : 0;
+  totalTablesHeight += bottomPadding + rowHeight;
+
+  const boxHeight = paddingY * 2 + titleHeight + titleGap + totalTablesHeight;
+
+  let boxX = anchorPoint.x + OVERLAY_MARGIN;
+  let boxY = anchorPoint.y - boxHeight - OVERLAY_MARGIN;
+  if (boxX + boxWidth > overlayCanvas.width - OVERLAY_MARGIN) {
+    boxX = overlayCanvas.width - OVERLAY_MARGIN - boxWidth;
+  }
+  if (boxX < OVERLAY_MARGIN) {
+    boxX = OVERLAY_MARGIN;
+  }
+  if (boxY < OVERLAY_MARGIN) {
+    boxY = anchorPoint.y + OVERLAY_MARGIN;
+    if (boxY + boxHeight > overlayCanvas.height - OVERLAY_MARGIN) {
+      boxY = overlayCanvas.height - OVERLAY_MARGIN - boxHeight;
+    }
+  }
+
+  layoutInfo.box = {
+    x: boxX,
+    y: boxY,
+    width: boxWidth,
+    height: boxHeight,
+  };
+
+  const radius = 10;
+  overlayCtx.fillStyle = 'rgba(13, 17, 23, 0.95)';
+  overlayCtx.strokeStyle = '#58a6ff';
+  overlayCtx.lineWidth = 2;
+  overlayCtx.beginPath();
+  overlayCtx.moveTo(boxX + radius, boxY);
+  overlayCtx.lineTo(boxX + boxWidth - radius, boxY);
+  overlayCtx.quadraticCurveTo(boxX + boxWidth, boxY, boxX + boxWidth, boxY + radius);
+  overlayCtx.lineTo(boxX + boxWidth, boxY + boxHeight - radius);
+  overlayCtx.quadraticCurveTo(boxX + boxWidth, boxY + boxHeight, boxX + boxWidth - radius, boxY + boxHeight);
+  overlayCtx.lineTo(boxX + radius, boxY + boxHeight);
+  overlayCtx.quadraticCurveTo(boxX, boxY + boxHeight, boxX, boxY + boxHeight - radius);
+  overlayCtx.lineTo(boxX, boxY + radius);
+  overlayCtx.quadraticCurveTo(boxX, boxY, boxX + radius, boxY);
+  overlayCtx.closePath();
+  overlayCtx.fill();
+  overlayCtx.stroke();
+
+  let cursorY = boxY + paddingY + (titleLines.length ? rowHeight / 2 : 0);
+  overlayCtx.fillStyle = '#e6edf3';
+  titleLines.forEach(line => {
+    overlayCtx.fillText(line, boxX + paddingX, cursorY);
+    cursorY += rowHeight;
+  });
+
+  if (titleHeight) {
+    cursorY += titleGap;
+  }
+
+  processedTables.forEach((info, idx) => {
+    const tableLayout = { header: null, rows: [] };
+    layoutInfo.tables[idx] = tableLayout;
+    if (!info.columnCount) {
+      return;
+    }
+
+    if (info.title) {
+      overlayCtx.fillStyle = '#58a6ff';
+      overlayCtx.fillText(info.title, boxX + paddingX, cursorY + rowHeight / 2);
+      cursorY += rowHeight + tableTitleGap;
+    }
+
+    const headerY = cursorY + rowHeight / 2;
+    const headerRect = {
+      x: boxX + 1,
+      y: headerY - rowHeight / 2,
+      width: boxWidth - 2,
+      height: rowHeight + headerBodyGap / 2,
+    };
+    tableLayout.header = headerRect;
+    const isHeaderHovered =
+      overlayState.hoverRow &&
+      overlayState.hoverRow.tableIndex === idx &&
+      overlayState.hoverRow.rowType === 'header';
+    overlayCtx.fillStyle = isHeaderHovered ? 'rgba(88, 166, 255, 0.35)' : 'rgba(88, 166, 255, 0.18)';
+    overlayCtx.fillRect(headerRect.x, headerRect.y, headerRect.width, headerRect.height);
+    overlayCtx.strokeStyle = 'rgba(88, 166, 255, 0.35)';
+    overlayCtx.beginPath();
+    overlayCtx.moveTo(boxX, headerY + rowHeight / 2 + headerBodyGap / 4);
+    overlayCtx.lineTo(boxX + boxWidth, headerY + rowHeight / 2 + headerBodyGap / 4);
+    overlayCtx.stroke();
+
+    const baseX = boxX + paddingX;
+    const columnPositions = [];
+    let cursorX = baseX;
+    info.columnWidths.forEach(width => {
+      columnPositions.push(cursorX);
+      cursorX += width + info.spacing;
+    });
+
+    overlayCtx.fillStyle = '#58a6ff';
+    info.headers.forEach((text, colIdx) => {
+      overlayCtx.fillText(text, columnPositions[colIdx], headerY);
+    });
+
+    cursorY = headerY + rowHeight + headerBodyGap;
+    info.rows.forEach((row, rowIdx) => {
+      const rowRect = {
+        x: boxX + 1,
+        y: cursorY,
+        width: boxWidth - 2,
+        height: rowHeight,
+      };
+      tableLayout.rows.push(rowRect);
+      const isRowHovered =
+        overlayState.hoverRow &&
+        overlayState.hoverRow.tableIndex === idx &&
+        overlayState.hoverRow.rowType === 'body' &&
+        overlayState.hoverRow.rowIndex === rowIdx;
+      if (isRowHovered) {
+        overlayCtx.fillStyle = 'rgba(88, 166, 255, 0.25)';
+        overlayCtx.fillRect(rowRect.x, rowRect.y, rowRect.width, rowRect.height);
+      }
+      overlayCtx.fillStyle = '#e6edf3';
+      row.forEach((text, colIdx) => {
+        overlayCtx.fillText(text, columnPositions[colIdx], cursorY + rowHeight / 2);
+      });
+      cursorY += rowHeight;
+    });
+
+    if (idx < processedTables.length - 1) {
+      cursorY += tableSpacing;
+    }
+  });
+
+  cursorY += bottomPadding;
+
+  overlayState.layout = layoutInfo;
+  overlayCtx.restore();
+}
 function hideOverlay() {
   if (!overlayState.visible) {
     clearOverlayCanvas();
@@ -159,7 +585,36 @@ function hideOverlay() {
   overlayState.nodeName = '';
   overlayState.description = '';
   overlayState.auto = false;
+  overlayState.maxWidth = 0;
+  overlayState.table = null;
+  overlayState.layout = null;
+  overlayState.hoverRow = null;
   clearOverlayCanvas();
+  setOverlayPointerCapture(false);
+}
+
+function handleOverlayPointerDown(event) {
+  event.stopPropagation();
+  event.preventDefault();
+  if (!overlayState.visible || !overlayState.layout) {
+    return;
+  }
+  const { box } = overlayState.layout;
+  if (!box) {
+    hideOverlay();
+    return;
+  }
+  const rect = overlayCanvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) {
+    return;
+  }
+  const scaleX = overlayCanvas.width / rect.width;
+  const scaleY = overlayCanvas.height / rect.height;
+  const x = (event.clientX - rect.left) * scaleX;
+  const y = (event.clientY - rect.top) * scaleY;
+  if (!pointInRect(x, y, box)) {
+    hideOverlay();
+  }
 }
 
 function hideContextMenu() {
@@ -171,10 +626,14 @@ function hideContextMenu() {
   if (contextMenu) {
     contextMenu.classList.remove('visible');
   }
+  contextMenuState.items = [];
 }
 
 function showContextMenu(clientPoint, target) {
   if (!contextMenu) {
+    return;
+  }
+  if (!configureContextMenu(target)) {
     return;
   }
   contextMenuState.visible = true;
@@ -215,51 +674,124 @@ function showContextMenu(clientPoint, target) {
 
 async function handleContextMenuAction(action, target) {
   hideContextMenu();
-  if (!target || (target.type !== 'topic-edge' && target.type !== 'topic-node')) {
-    return;
-  }
-  const topicGeometry = currentScene.nodes?.get(target.topicName);
-  if (!topicGeometry) {
-    statusEl.textContent = `Topic ${target.topicName} not visible in current layout`;
+  if (!target) {
     return;
   }
 
-  if (action === 'info') {
-    showOverlayForNode(target.topicName, topicGeometry);
-    const peerInfo = target.peerName ? ` (connection with ${target.peerName})` : '';
-    statusEl.textContent = `Details shown for ${target.topicName}${peerInfo}`;
-    return;
-  }
-
-  if (action !== 'stats') {
-    statusEl.textContent = `Unsupported topic action: ${action}`;
-    return;
-  }
-
-  const peerInfo = target.peerName ? ` ↔ ${target.peerName}` : '';
-  const actionLabel = action.charAt(0).toUpperCase() + action.slice(1);
-  const measuringText =
-    `Topic: ${target.topicName}\n` +
-    (target.peerName ? `Peer: ${target.peerName}\n` : '') +
-    'Collecting stats…';
-  showOverlayWithDescription(target.topicName, measuringText, false);
-  statusEl.textContent = `Collecting ${action} for ${target.topicName}${peerInfo}…`;
-  try {
-    const payload = await requestTopicTool(action, target.topicName, target.peerName);
-    showTopicMeasurementOverlay(action, target, payload);
-  } catch (err) {
-    let message;
-    if (err?.name === 'AbortError') {
-      message = 'request timed out';
-    } else {
-      message = err?.message || String(err);
+  if (target.type === 'topic-edge' || target.type === 'topic-node') {
+    const topicGeometry = currentScene.nodes?.get(target.topicName);
+    if (!topicGeometry) {
+      statusEl.textContent = `Topic ${target.topicName} not visible in current layout`;
+      return;
     }
-    statusEl.textContent = `Failed to collect ${action} for ${target.topicName}: ${message}`;
-    showOverlayWithDescription(
-      target.topicName,
-      `Topic: ${target.topicName}\n${actionLabel} measurement failed.\n${message}`,
-    );
+
+    if (action === 'info') {
+      showOverlayForNode(target.topicName, topicGeometry);
+      const peerInfo = target.peerName ? ` (connection with ${target.peerName})` : '';
+      statusEl.textContent = `Details shown for ${target.topicName}${peerInfo}`;
+      return;
+    }
+
+    if (action !== 'stats') {
+      statusEl.textContent = `Unsupported topic action: ${action}`;
+      return;
+    }
+
+    const peerInfo = target.peerName ? ` ↔ ${target.peerName}` : '';
+    const actionLabel = action.charAt(0).toUpperCase() + action.slice(1);
+    const measuringText =
+      `Topic: ${target.topicName}\n` +
+      (target.peerName ? `Peer: ${target.peerName}\n` : '') +
+      'Collecting stats…';
+    showOverlayWithDescription(target.topicName, measuringText, false);
+    statusEl.textContent = `Collecting ${action} for ${target.topicName}${peerInfo}…`;
+    try {
+      const payload = await requestTopicTool(action, target.topicName, target.peerName);
+      showTopicMeasurementOverlay(action, target, payload);
+    } catch (err) {
+      let message;
+      if (err?.name === 'AbortError') {
+        message = 'request timed out';
+      } else {
+        message = err?.message || String(err);
+      }
+      statusEl.textContent = `Failed to collect ${action} for ${target.topicName}: ${message}`;
+      showOverlayWithDescription(
+        target.topicName,
+        `Topic: ${target.topicName}\n${actionLabel} measurement failed.\n${message}`,
+      );
+    }
+    return;
   }
+
+  if (target.type === 'node') {
+    const nodeGeometry = currentScene.nodes?.get(target.nodeName);
+    if (!nodeGeometry) {
+      statusEl.textContent = `Node ${target.nodeName} not visible in current layout`;
+      return;
+    }
+
+    if (action === 'info') {
+      const cachedFeatureTable = nodeFeatureInfo.get(target.nodeName);
+      if (cachedFeatureTable) {
+        showOverlayWithTables(target.nodeName, cachedFeatureTable);
+      } else {
+        showOverlayForNode(target.nodeName, nodeGeometry);
+      }
+      statusEl.textContent = `Details shown for ${target.nodeName}`;
+      if (!nodeFeatureInfo.has(target.nodeName)) {
+        void enrichNodeInfoOverlay(target.nodeName);
+      }
+      return;
+    }
+
+    if (action === 'services') {
+      const placeholder =
+        `Node: ${target.nodeName}\n` +
+        'Collecting services…';
+      showOverlayWithDescription(target.nodeName, placeholder, false);
+      statusEl.textContent = `Collecting services for ${target.nodeName}…`;
+      try {
+        const payload = await requestNodeTool('services', target.nodeName);
+        showNodeServicesOverlay(target.nodeName, payload);
+      } catch (err) {
+        const message = err?.message || String(err);
+        statusEl.textContent = `Failed to fetch services for ${target.nodeName}: ${message}`;
+        showOverlayWithDescription(
+          target.nodeName,
+          `Node: ${target.nodeName}\nService query failed.\n${message}`,
+          false,
+        );
+      }
+      return;
+    }
+
+    if (action === 'parameters') {
+      const placeholder =
+        `Node: ${target.nodeName}\n` +
+        'Collecting parameters…';
+      showOverlayWithDescription(target.nodeName, placeholder, false);
+      statusEl.textContent = `Collecting parameters for ${target.nodeName}…`;
+      try {
+        const payload = await requestNodeTool('parameters', target.nodeName);
+        showNodeParametersOverlay(target.nodeName, payload);
+      } catch (err) {
+        const message = err?.message || String(err);
+        statusEl.textContent = `Failed to fetch parameters for ${target.nodeName}: ${message}`;
+        showOverlayWithDescription(
+          target.nodeName,
+          `Node: ${target.nodeName}\nParameter query failed.\n${message}`,
+          false,
+        );
+      }
+      return;
+    }
+
+    statusEl.textContent = `Unsupported node action: ${action}`;
+    return;
+  }
+
+  statusEl.textContent = `Unsupported context action: ${action}`;
 }
 
 function handleContextMenuClick(event) {
@@ -323,6 +855,16 @@ function resolveTopicNodeTarget(nodeHit) {
   };
 }
 
+function resolveNodeTarget(nodeHit) {
+  if (!nodeHit?.geometry || nodeHit.geometry.type !== 'node') {
+    return null;
+  }
+  return {
+    type: 'node',
+    nodeName: nodeHit.name,
+  };
+}
+
 function validateContextMenuTarget() {
   if (!contextMenuState.visible || !contextMenuState.target) {
     return;
@@ -336,6 +878,12 @@ function validateContextMenuTarget() {
   }
   if (contextMenuState.target.type === 'topic-node') {
     if (!currentScene.nodes?.has(contextMenuState.target.topicName)) {
+      hideContextMenu();
+    }
+    return;
+  }
+  if (contextMenuState.target.type === 'node') {
+    if (!currentScene.nodes?.has(contextMenuState.target.nodeName)) {
       hideContextMenu();
     }
   }
@@ -373,6 +921,35 @@ async function requestTopicTool(action, topicName, peerName) {
   return payload;
 }
 
+async function requestNodeTool(action, nodeName) {
+  const params = new URLSearchParams();
+  params.set('action', action);
+  params.set('node', nodeName);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TOPIC_TOOL_TIMEOUT);
+  let response;
+  let payload = {};
+  try {
+    response = await fetch(`/node_tool?${params.toString()}`, {
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    try {
+      payload = await response.json();
+    } catch (err) {
+      payload = {};
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!response?.ok) {
+    const message = payload?.error || `HTTP ${response?.status ?? 'error'}`;
+    throw new Error(message);
+  }
+  return payload;
+}
+
 function showTopicMeasurementOverlay(action, target, payload) {
   if (!payload || typeof payload !== 'object') {
     statusEl.textContent = `No data returned for ${action} on ${target.topicName}`;
@@ -384,42 +961,65 @@ function showTopicMeasurementOverlay(action, target, payload) {
     return;
   }
 
-  const lines = [];
   const topicName = payload.topic || target.topicName;
-  lines.push(`Topic: ${topicName}`);
+  const titleLines = [];
+  titleLines.push(`Topic: ${topicName}`);
   if (payload.type) {
-    lines.push(`Type: ${payload.type}`);
+    titleLines.push(`Type: ${payload.type}`);
   }
-  lines.push(`Cached: ${payload.cached ? 'yes' : 'no'}`);
+  const samplesLineParts = [];
   if (payload.message_count !== undefined) {
-    lines.push(`Messages observed: ${payload.message_count}`);
+    samplesLineParts.push(`Samples: ${payload.message_count}`);
   }
   if (payload.duration !== undefined) {
-    lines.push(`Window: ${formatNumber(payload.duration, 2)} s`);
+    samplesLineParts.push(`Window: ${formatNumber(payload.duration, 2)} s`);
   }
-  lines.push('');
-
+  if (samplesLineParts.length) {
+    titleLines.push(samplesLineParts.join(' | '));
+  }
+  titleLines.push(`Cached: ${payload.cached ? 'yes' : 'no'}`);
   if (payload.warning) {
-    lines.push(`Warning: ${payload.warning}`);
+    titleLines.push(`Warning: ${payload.warning}`);
   }
 
-  if (payload.average_hz !== undefined || payload.min_hz !== undefined || payload.max_hz !== undefined) {
-    lines.push('Frequency:');
-    lines.push(`  avg: ${formatHz(payload.average_hz)}`);
-    lines.push(`  min: ${formatHz(payload.min_hz)}`);
-    lines.push(`  max: ${formatHz(payload.max_hz)}`);
-  }
+  const frequencyTable = {
+    title: 'Frequency (Hz)',
+    headers: ['Min', 'Avg', 'Max'],
+    rows: [[
+      formatHz(payload.min_hz),
+      formatHz(payload.average_hz),
+      formatHz(payload.max_hz),
+    ]],
+  };
 
-  if (payload.average_bps !== undefined || payload.average_bytes_per_msg !== undefined) {
-    lines.push('');
-    lines.push('Bandwidth:');
-    lines.push(`  avg: ${formatBytesPerSecond(payload.average_bps)}`);
-    lines.push(`  msg size: ${formatBytes(payload.average_bytes_per_msg)}`);
-    lines.push(`  max size: ${formatBytes(payload.max_bytes)}`);
-    lines.push(`  min size: ${formatBytes(payload.min_bytes)}`);
-  }
+  const messageSizeTable = {
+    title: 'Message Size',
+    headers: ['Min', 'Avg', 'Max'],
+    rows: [[
+      formatBytes(payload.min_bytes),
+      formatBytes(payload.average_bytes_per_msg),
+      formatBytes(payload.max_bytes),
+    ]],
+  };
 
-  showOverlayWithDescription(topicName, lines.join('\n'));
+  const minBps = computeBandwidthValue(payload.min_hz, payload.min_bytes);
+  const avgBps = payload.average_bps ?? computeBandwidthValue(payload.average_hz, payload.average_bytes_per_msg);
+  const maxBps = computeBandwidthValue(payload.max_hz, payload.max_bytes);
+
+  const bandwidthTable = {
+    title: 'Bandwidth (B/s)',
+    headers: ['Min', 'Avg', 'Max'],
+    rows: [[
+      formatBytesPerSecond(minBps),
+      formatBytesPerSecond(avgBps),
+      formatBytesPerSecond(maxBps),
+    ]],
+  };
+
+  showOverlayWithTables(topicName, {
+    titleLines,
+    tables: [frequencyTable, messageSizeTable, bandwidthTable],
+  });
 
   const peerInfo = target.peerName ? ` ↔ ${target.peerName}` : '';
   const actionLabel = action.charAt(0).toUpperCase() + action.slice(1);
@@ -437,6 +1037,187 @@ function showTopicMeasurementOverlay(action, target, payload) {
       }
     }
   }
+}
+
+function showNodeServicesOverlay(nodeName, payload) {
+  if (!payload || typeof payload !== 'object') {
+    statusEl.textContent = `No data returned for services on ${nodeName}`;
+    return;
+  }
+  const geometry = currentScene.nodes?.get(nodeName);
+  if (!geometry) {
+    statusEl.textContent = `Received services for ${nodeName}, but it is not visible.`;
+    return;
+  }
+
+  const titleLines = [`Node: ${nodeName}`];
+  if (payload.namespace) {
+    titleLines.push(`Namespace: ${payload.namespace}`);
+  }
+  const rows = Array.isArray(payload.services)
+    ? payload.services.map(entry => {
+        const name = entry?.name ?? '(unknown)';
+        const types = Array.isArray(entry?.types) && entry.types.length
+          ? entry.types.join(', ')
+          : 'unknown type';
+        return [name, types];
+      })
+    : [];
+  const count = rows.length;
+
+  if (!rows.length) {
+    const lines = [...titleLines, 'No services available.'];
+    showOverlayWithDescription(nodeName, lines.join('\n'), false);
+  } else {
+    showOverlayWithTables(nodeName, {
+      titleLines,
+      tables: [
+        {
+          title: 'Services',
+          headers: ['Service', 'Type'],
+          rows,
+        },
+      ],
+    });
+  }
+  statusEl.textContent = `Services for ${nodeName}: ${count} found`;
+}
+
+function updateNodeFeatureInfoFromParameters(nodeName, parameters) {
+  if (!nodeName) {
+    return null;
+  }
+  const featureMap = new Map();
+  const entries = Array.isArray(parameters) ? parameters : [];
+  entries.forEach(entry => {
+    const paramName = entry?.name;
+    if (typeof paramName !== 'string') {
+      return;
+    }
+    const match = paramName.match(/^feature(?:\.([^.]+))?\.(name|class|version|gui_version|state)$/i);
+    if (!match) {
+      return;
+    }
+    const featureKey = match[1] ? match[1] : '';
+    const field = match[2].toLowerCase();
+    if (!FEATURE_PARAM_ORDER.includes(field)) {
+      return;
+    }
+    if (!featureMap.has(featureKey)) {
+      featureMap.set(featureKey, new Map());
+    }
+    const value = entry?.value !== undefined ? String(entry.value) : '';
+    featureMap.get(featureKey).set(field, value);
+  });
+
+  const tables = [];
+  const keys = Array.from(featureMap.keys()).sort((a, b) => a.localeCompare(b));
+  keys.forEach(key => {
+    const fieldMap = featureMap.get(key);
+    if (!fieldMap) {
+      return;
+    }
+    const rows = [];
+    FEATURE_PARAM_ORDER.forEach(field => {
+      if (!fieldMap.has(field)) {
+        return;
+      }
+      const label = FEATURE_LABELS[field] || field;
+      rows.push([label, fieldMap.get(field)]);
+    });
+    if (!rows.length) {
+      return;
+    }
+    const title = key ? `Feature: ${key}` : 'Feature';
+    tables.push({
+      title,
+      headers: ['Field', 'Value'],
+      rows,
+    });
+  });
+
+  if (!tables.length) {
+    nodeFeatureInfo.delete(nodeName);
+    return null;
+  }
+
+  const data = {
+    titleLines: buildNodeTitleLines(nodeName),
+    tables,
+  };
+  nodeFeatureInfo.set(nodeName, data);
+  return data;
+}
+
+async function enrichNodeInfoOverlay(nodeName) {
+  if (!nodeName || !overlayState.visible || overlayState.nodeName !== nodeName) {
+    return;
+  }
+  if (nodeFeatureInfo.has(nodeName)) {
+    const cached = nodeFeatureInfo.get(nodeName);
+    if (cached && overlayState.visible && overlayState.nodeName === nodeName) {
+      showOverlayWithTables(nodeName, cached);
+    }
+    return;
+  }
+
+  try {
+    const payload = await requestNodeTool('parameters', nodeName);
+    const tableData = updateNodeFeatureInfoFromParameters(nodeName, payload?.parameters);
+    if (tableData && overlayState.visible && overlayState.nodeName === nodeName) {
+      showOverlayWithTables(nodeName, tableData);
+      statusEl.textContent = `Details shown for ${nodeName}`;
+    }
+  } catch (err) {
+    if (typeof console !== 'undefined') {
+      console.debug('Failed to enrich node info overlay', err);
+    }
+  }
+}
+
+function showNodeParametersOverlay(nodeName, payload) {
+  if (!payload || typeof payload !== 'object') {
+    statusEl.textContent = `No data returned for parameters on ${nodeName}`;
+    return;
+  }
+  const geometry = currentScene.nodes?.get(nodeName);
+  if (!geometry) {
+    statusEl.textContent = `Received parameters for ${nodeName}, but it is not visible.`;
+    return;
+  }
+
+  const titleLines = [`Node: ${nodeName}`];
+  if (payload.namespace) {
+    titleLines.push(`Namespace: ${payload.namespace}`);
+  }
+  const rows = Array.isArray(payload.parameters)
+    ? payload.parameters.map(entry => {
+        const name = entry?.name ?? '(unknown)';
+        const value = entry?.value ?? '';
+        return [name, String(value)];
+      })
+    : [];
+  const count = rows.length;
+
+  if (!rows.length) {
+    const lines = [...titleLines, 'No parameters available.'];
+    showOverlayWithDescription(nodeName, lines.join('\n'), false);
+  } else {
+    const header = ['Name', 'Value'];
+    showOverlayWithTables(nodeName, {
+      titleLines,
+      tables: [
+        {
+          title: `Parameters (${count})`,
+          headers: header,
+          rows,
+        },
+      ],
+    });
+  }
+
+  updateNodeFeatureInfoFromParameters(nodeName, payload.parameters);
+  statusEl.textContent = `Parameters for ${nodeName}: ${count} found`;
 }
 
 function toGraphSpace(point) {
@@ -572,7 +1353,10 @@ function drawOverlayTextbox(anchorPoint, nodeName, description) {
   overlayCtx.font = OVERLAY_FONT;
   overlayCtx.textBaseline = 'top';
   overlayCtx.textAlign = 'left';
-  const maxTextWidth = OVERLAY_MAX_WIDTH - OVERLAY_PADDING * 2;
+  const widthLimit = overlayState.maxWidth > 0
+    ? Math.max(overlayState.maxWidth, OVERLAY_PADDING * 2 + 40)
+    : OVERLAY_MAX_WIDTH;
+  const maxTextWidth = Math.max(OVERLAY_PADDING * 2, widthLimit - OVERLAY_PADDING * 2);
   const lines = wrapOverlayText(description, maxTextWidth);
   let maxWidth = 0;
   lines.forEach(line => {
@@ -581,7 +1365,8 @@ function drawOverlayTextbox(anchorPoint, nodeName, description) {
       maxWidth = width;
     }
   });
-  const boxWidth = Math.min(OVERLAY_MAX_WIDTH, Math.max(maxWidth, 120) + OVERLAY_PADDING * 2);
+  const desiredWidth = Math.max(maxWidth, 120) + OVERLAY_PADDING * 2;
+  const boxWidth = Math.min(widthLimit, desiredWidth);
   const boxHeight = OVERLAY_PADDING * 2 + lines.length * OVERLAY_LINE_HEIGHT;
   let boxX = anchorPoint.x + OVERLAY_MARGIN;
   let boxY = anchorPoint.y - boxHeight - OVERLAY_MARGIN;
@@ -626,6 +1411,15 @@ function drawOverlayTextbox(anchorPoint, nodeName, description) {
     overlayCtx.fillStyle = idx === 0 ? '#58a6ff' : '#e6edf3';
     overlayCtx.fillText(line, textX, textY);
   });
+  overlayState.layout = {
+    box: {
+      x: boxX,
+      y: boxY,
+      width: boxWidth,
+      height: boxHeight,
+    },
+    tables: [],
+  };
   overlayCtx.restore();
 }
 
@@ -639,8 +1433,14 @@ function refreshOverlay() {
     hideOverlay();
     return;
   }
+  if (overlayState.table) {
+    const anchorPoint = layoutToView(geometry.center);
+    drawOverlayTables(anchorPoint, overlayState.table);
+    return;
+  }
   if (overlayState.auto) {
     overlayState.description = resolveOverlayDescription(overlayState.nodeName, geometry);
+    overlayState.maxWidth = 0;
   }
   const anchorPoint = layoutToView(geometry.center);
   drawOverlayTextbox(anchorPoint, overlayState.nodeName, overlayState.description);
@@ -663,11 +1463,29 @@ function showOverlayForNode(nodeName, geometry) {
   showOverlayWithDescription(nodeName, description, true);
 }
 
-function showOverlayWithDescription(nodeName, description, auto = false) {
+function showOverlayWithDescription(nodeName, description, auto = false, maxWidth = 0) {
   overlayState.visible = true;
   overlayState.nodeName = nodeName;
   overlayState.description = description;
   overlayState.auto = auto;
+  overlayState.maxWidth = Math.max(0, maxWidth || 0);
+  overlayState.table = null;
+  overlayState.layout = null;
+  overlayState.hoverRow = null;
+  setOverlayPointerCapture(true);
+  refreshOverlay();
+}
+
+function showOverlayWithTables(nodeName, tableData) {
+  overlayState.visible = true;
+  overlayState.nodeName = nodeName;
+  overlayState.description = '';
+  overlayState.auto = false;
+  overlayState.maxWidth = 0;
+  overlayState.table = tableData;
+  overlayState.layout = null;
+  overlayState.hoverRow = null;
+  setOverlayPointerCapture(true);
   refreshOverlay();
 }
 
@@ -1353,7 +2171,7 @@ function splitNodeName(nodeName) {
   return { namespace, basename };
 }
 
-function buildDefaultNodeDescription(nodeName) {
+function buildNodeTitleLines(nodeName) {
   const parts = splitNodeName(nodeName);
   const lines = [`Node: ${nodeName}`];
   if (parts.basename && parts.basename !== nodeName) {
@@ -1361,12 +2179,17 @@ function buildDefaultNodeDescription(nodeName) {
   }
   if (parts.namespace && parts.namespace !== nodeName) {
     lines.push(`Namespace: ${parts.namespace}`);
-  } else if (!parts.namespace) {
+  } else if (!parts.namespace || parts.namespace === nodeName) {
     lines.push('Namespace: /');
   }
   if (lines.length === 1) {
     lines.push('Namespace: /');
   }
+  return lines;
+}
+
+function buildDefaultNodeDescription(nodeName) {
+  const lines = buildNodeTitleLines(nodeName);
   lines.push('');
   lines.push('No description available.');
   return lines.join('\n');
@@ -1474,6 +2297,12 @@ function renderGraph(graph, fingerprint = lastFingerprint) {
 
   lastGraph = graph;
   nodeDescriptions = buildNodeDescriptions(graph);
+  const availableNodes = new Set(graph.nodes || []);
+  for (const key of Array.from(nodeFeatureInfo.keys())) {
+    if (!availableNodes.has(key)) {
+      nodeFeatureInfo.delete(key);
+    }
+  }
   const width = canvas.width;
   const height = canvas.height;
   const nodeNames = (graph.nodes || []).filter(name => !isHiddenGraphName(name));
@@ -1859,7 +2688,7 @@ function handleContextMenu(event) {
       return;
     }
   }
-  const edgeHit = findEdgeAt(graphPoint);
+  const edgeHit = nodeHit ? null : findEdgeAt(graphPoint);
   if (edgeHit) {
     const target = resolveTopicEdgeTarget(edgeHit);
     if (target) {
@@ -1868,10 +2697,13 @@ function handleContextMenu(event) {
       return;
     }
   }
-  if (nodeHit) {
-    hideContextMenu();
-    showOverlayForNode(nodeHit.name, nodeHit.geometry);
-    return;
+  if (nodeHit && nodeHit.geometry?.type === 'node') {
+    hideOverlay();
+    const target = resolveNodeTarget(nodeHit);
+    if (target) {
+      showContextMenu({ x: event.clientX, y: event.clientY }, target);
+      return;
+    }
   }
   hideOverlay();
   hideContextMenu();
