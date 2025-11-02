@@ -58,6 +58,7 @@ const overlayState = {
   description: '',
   auto: false,
   maxWidth: 0,
+  table: null,
 };
 const contextMenu = document.getElementById('contextMenu');
 const contextMenuState = {
@@ -73,7 +74,7 @@ const BASE_LINE_HEIGHT = 18;
 const POINTS_PER_INCH = 72;
 const MIN_FONT_SIZE_PX = 7;
 const BASE_LINE_HEIGHT_RATIO = BASE_LINE_HEIGHT / BASE_FONT_SIZE;
-const OVERLAY_FONT = '13px "Segoe UI", system-ui, -apple-system, sans-serif';
+const OVERLAY_FONT = '14.3px "Segoe UI", system-ui, -apple-system, sans-serif';
 const OVERLAY_LINE_HEIGHT = 18;
 const OVERLAY_PADDING = 12;
 const OVERLAY_MAX_WIDTH = 320;
@@ -145,6 +146,16 @@ function formatBytesPerSecond(value) {
   return value.toFixed(0) + ' B/s';
 }
 
+function computeBandwidthValue(frequency, size) {
+  if (!Number.isFinite(frequency) || frequency <= 0) {
+    return null;
+  }
+  if (!Number.isFinite(size) || size <= 0) {
+    return null;
+  }
+  return frequency * size;
+}
+
 function getContextMenuItemsForTarget(target) {
   if (!target) {
     return [];
@@ -193,6 +204,219 @@ function clearOverlayCanvas() {
   overlayCtx.restore();
 }
 
+function drawOverlayTables(anchorPoint, data) {
+  const tables = Array.isArray(data?.tables) ? data.tables.filter(Boolean) : [];
+  const titleLines = Array.isArray(data?.titleLines) ? data.titleLines : [];
+  if (!tables.length && !titleLines.length) {
+    return;
+  }
+
+  overlayCtx.save();
+  overlayCtx.setTransform(1, 0, 0, 1, 0, 0);
+  overlayCtx.font = OVERLAY_FONT;
+  overlayCtx.textBaseline = 'middle';
+  overlayCtx.textAlign = 'left';
+
+  const rowHeight = OVERLAY_LINE_HEIGHT;
+  const paddingX = OVERLAY_PADDING;
+  const paddingY = OVERLAY_PADDING;
+  const tableSpacing = rowHeight * 0.8;
+  const tableTitleGap = rowHeight * 0.4;
+  const headerBodyGap = rowHeight * 0.3;
+  const columnSpacing = 24;
+
+  const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : overlayCanvas.width;
+  const maxAllowedWidth = Math.max(OVERLAY_PADDING * 2 + 160, viewportWidth - OVERLAY_MARGIN * 2);
+
+  let maxTitleWidth = 0;
+  titleLines.forEach(line => {
+    const width = overlayCtx.measureText(line).width;
+    if (width > maxTitleWidth) {
+      maxTitleWidth = width;
+    }
+  });
+
+  const processedTables = tables.map(table => {
+    const tableTitle = typeof table.title === 'string' ? table.title : '';
+    const headers = Array.isArray(table.headers) ? table.headers.map(text => text ?? '') : [];
+    const rawRows = Array.isArray(table.rows) ? table.rows : [];
+    const columnCount = headers.length || (rawRows[0] ? rawRows[0].length : 0);
+    const rows = rawRows.map(row => {
+      const arr = [];
+      for (let i = 0; i < columnCount; i += 1) {
+        arr.push(row?.[i] ?? '');
+      }
+      return arr;
+    });
+
+    const columnWidths = new Array(columnCount).fill(0);
+    headers.forEach((text, idx) => {
+      const width = overlayCtx.measureText(text).width;
+      columnWidths[idx] = Math.max(columnWidths[idx], width);
+    });
+    rows.forEach(row => {
+      row.forEach((text, idx) => {
+        const width = overlayCtx.measureText(text).width;
+        if (width > columnWidths[idx]) {
+          columnWidths[idx] = width;
+        }
+      });
+    });
+
+    const tableTitleWidth = tableTitle ? overlayCtx.measureText(tableTitle).width : 0;
+    const rawWidth = columnCount
+      ? columnWidths.reduce((sum, width) => sum + width, 0) + columnSpacing * Math.max(0, columnCount - 1)
+      : 0;
+
+    return {
+      title: tableTitle,
+      headers: headers.length ? headers : new Array(columnCount).fill(''),
+      rows,
+      columnCount,
+      columnWidths,
+      rawWidth,
+      titleWidth: tableTitleWidth,
+      spacing: columnSpacing,
+    };
+  });
+
+  let contentWidth = maxTitleWidth;
+  processedTables.forEach(info => {
+    contentWidth = Math.max(contentWidth, info.titleWidth, info.rawWidth);
+  });
+
+  let boxWidth = Math.max(contentWidth + paddingX * 2, 200);
+  if (boxWidth > maxAllowedWidth) {
+    boxWidth = maxAllowedWidth;
+  }
+
+  const innerWidth = boxWidth - paddingX * 2;
+  processedTables.forEach(info => {
+    if (info.columnCount && info.rawWidth > innerWidth) {
+      const scale = Math.max(0.3, innerWidth / Math.max(info.rawWidth, 1));
+      info.columnWidths = info.columnWidths.map(width => width * scale);
+      info.spacing = info.spacing * scale;
+      info.rawWidth = info.columnWidths.reduce((sum, width) => sum + width, 0) + info.spacing * Math.max(0, info.columnCount - 1);
+    }
+  });
+
+  const titleHeight = titleLines.length ? titleLines.length * rowHeight : 0;
+  const titleGap = tables.length ? Math.max(rowHeight * 0.35, 6) : 0;
+
+  let totalTablesHeight = 0;
+  processedTables.forEach((info, idx) => {
+    if (!info.columnCount) {
+      return;
+    }
+    const tableTitleHeight = info.title ? rowHeight : 0;
+    const preHeaderGap = info.title ? tableTitleGap : 0;
+    const headerHeight = rowHeight;
+    const bodyHeight = info.rows.length * rowHeight;
+    totalTablesHeight += tableTitleHeight + preHeaderGap + headerHeight + headerBodyGap + bodyHeight;
+    if (idx < processedTables.length - 1) {
+      totalTablesHeight += tableSpacing;
+    }
+  });
+  const bottomPadding = processedTables.length ? Math.max(rowHeight * 0.6, 10) : 0;
+  totalTablesHeight += bottomPadding + rowHeight;
+
+  const boxHeight = paddingY * 2 + titleHeight + titleGap + totalTablesHeight;
+
+  let boxX = anchorPoint.x + OVERLAY_MARGIN;
+  let boxY = anchorPoint.y - boxHeight - OVERLAY_MARGIN;
+  if (boxX + boxWidth > overlayCanvas.width - OVERLAY_MARGIN) {
+    boxX = overlayCanvas.width - OVERLAY_MARGIN - boxWidth;
+  }
+  if (boxX < OVERLAY_MARGIN) {
+    boxX = OVERLAY_MARGIN;
+  }
+  if (boxY < OVERLAY_MARGIN) {
+    boxY = anchorPoint.y + OVERLAY_MARGIN;
+    if (boxY + boxHeight > overlayCanvas.height - OVERLAY_MARGIN) {
+      boxY = overlayCanvas.height - OVERLAY_MARGIN - boxHeight;
+    }
+  }
+
+  const radius = 10;
+  overlayCtx.fillStyle = 'rgba(13, 17, 23, 0.95)';
+  overlayCtx.strokeStyle = '#58a6ff';
+  overlayCtx.lineWidth = 2;
+  overlayCtx.beginPath();
+  overlayCtx.moveTo(boxX + radius, boxY);
+  overlayCtx.lineTo(boxX + boxWidth - radius, boxY);
+  overlayCtx.quadraticCurveTo(boxX + boxWidth, boxY, boxX + boxWidth, boxY + radius);
+  overlayCtx.lineTo(boxX + boxWidth, boxY + boxHeight - radius);
+  overlayCtx.quadraticCurveTo(boxX + boxWidth, boxY + boxHeight, boxX + boxWidth - radius, boxY + boxHeight);
+  overlayCtx.lineTo(boxX + radius, boxY + boxHeight);
+  overlayCtx.quadraticCurveTo(boxX, boxY + boxHeight, boxX, boxY + boxHeight - radius);
+  overlayCtx.lineTo(boxX, boxY + radius);
+  overlayCtx.quadraticCurveTo(boxX, boxY, boxX + radius, boxY);
+  overlayCtx.closePath();
+  overlayCtx.fill();
+  overlayCtx.stroke();
+
+  let cursorY = boxY + paddingY + (titleLines.length ? rowHeight / 2 : 0);
+  overlayCtx.fillStyle = '#e6edf3';
+  titleLines.forEach(line => {
+    overlayCtx.fillText(line, boxX + paddingX, cursorY);
+    cursorY += rowHeight;
+  });
+
+  if (titleHeight) {
+    cursorY += titleGap;
+  }
+
+  processedTables.forEach((info, idx) => {
+    if (!info.columnCount) {
+      return;
+    }
+
+    if (info.title) {
+      overlayCtx.fillStyle = '#58a6ff';
+      overlayCtx.fillText(info.title, boxX + paddingX, cursorY + rowHeight / 2);
+      cursorY += rowHeight + tableTitleGap;
+    }
+
+    const headerY = cursorY + rowHeight / 2;
+    overlayCtx.fillStyle = 'rgba(88, 166, 255, 0.18)';
+    overlayCtx.fillRect(boxX + 1, headerY - rowHeight / 2, boxWidth - 2, rowHeight + headerBodyGap / 2);
+    overlayCtx.strokeStyle = 'rgba(88, 166, 255, 0.35)';
+    overlayCtx.beginPath();
+    overlayCtx.moveTo(boxX, headerY + rowHeight / 2 + headerBodyGap / 4);
+    overlayCtx.lineTo(boxX + boxWidth, headerY + rowHeight / 2 + headerBodyGap / 4);
+    overlayCtx.stroke();
+
+    const baseX = boxX + paddingX;
+    const columnPositions = [];
+    let cursorX = baseX;
+    info.columnWidths.forEach(width => {
+      columnPositions.push(cursorX);
+      cursorX += width + info.spacing;
+    });
+
+    overlayCtx.fillStyle = '#58a6ff';
+    info.headers.forEach((text, colIdx) => {
+      overlayCtx.fillText(text, columnPositions[colIdx], headerY);
+    });
+
+    cursorY = headerY + rowHeight + headerBodyGap;
+    overlayCtx.fillStyle = '#e6edf3';
+    info.rows.forEach(row => {
+      row.forEach((text, colIdx) => {
+        overlayCtx.fillText(text, columnPositions[colIdx], cursorY + rowHeight / 2);
+      });
+      cursorY += rowHeight;
+    });
+
+    if (idx < processedTables.length - 1) {
+      cursorY += tableSpacing;
+    }
+  });
+
+  cursorY += bottomPadding;
+
+  overlayCtx.restore();
+}
 function hideOverlay() {
   if (!overlayState.visible) {
     clearOverlayCanvas();
@@ -203,6 +427,7 @@ function hideOverlay() {
   overlayState.description = '';
   overlayState.auto = false;
   overlayState.maxWidth = 0;
+  overlayState.table = null;
   clearOverlayCanvas();
 }
 
@@ -532,42 +757,65 @@ function showTopicMeasurementOverlay(action, target, payload) {
     return;
   }
 
-  const lines = [];
   const topicName = payload.topic || target.topicName;
-  lines.push(`Topic: ${topicName}`);
+  const titleLines = [];
+  titleLines.push(`Topic: ${topicName}`);
   if (payload.type) {
-    lines.push(`Type: ${payload.type}`);
+    titleLines.push(`Type: ${payload.type}`);
   }
-  lines.push(`Cached: ${payload.cached ? 'yes' : 'no'}`);
+  const samplesLineParts = [];
   if (payload.message_count !== undefined) {
-    lines.push(`Messages observed: ${payload.message_count}`);
+    samplesLineParts.push(`Samples: ${payload.message_count}`);
   }
   if (payload.duration !== undefined) {
-    lines.push(`Window: ${formatNumber(payload.duration, 2)} s`);
+    samplesLineParts.push(`Window: ${formatNumber(payload.duration, 2)} s`);
   }
-  lines.push('');
-
+  if (samplesLineParts.length) {
+    titleLines.push(samplesLineParts.join(' | '));
+  }
+  titleLines.push(`Cached: ${payload.cached ? 'yes' : 'no'}`);
   if (payload.warning) {
-    lines.push(`Warning: ${payload.warning}`);
+    titleLines.push(`Warning: ${payload.warning}`);
   }
 
-  if (payload.average_hz !== undefined || payload.min_hz !== undefined || payload.max_hz !== undefined) {
-    lines.push('Frequency:');
-    lines.push(`  avg: ${formatHz(payload.average_hz)}`);
-    lines.push(`  min: ${formatHz(payload.min_hz)}`);
-    lines.push(`  max: ${formatHz(payload.max_hz)}`);
-  }
+  const frequencyTable = {
+    title: 'Frequency (Hz)',
+    headers: ['Min', 'Avg', 'Max'],
+    rows: [[
+      formatHz(payload.min_hz),
+      formatHz(payload.average_hz),
+      formatHz(payload.max_hz),
+    ]],
+  };
 
-  if (payload.average_bps !== undefined || payload.average_bytes_per_msg !== undefined) {
-    lines.push('');
-    lines.push('Bandwidth:');
-    lines.push(`  avg: ${formatBytesPerSecond(payload.average_bps)}`);
-    lines.push(`  msg size: ${formatBytes(payload.average_bytes_per_msg)}`);
-    lines.push(`  max size: ${formatBytes(payload.max_bytes)}`);
-    lines.push(`  min size: ${formatBytes(payload.min_bytes)}`);
-  }
+  const messageSizeTable = {
+    title: 'Message Size',
+    headers: ['Min', 'Avg', 'Max'],
+    rows: [[
+      formatBytes(payload.min_bytes),
+      formatBytes(payload.average_bytes_per_msg),
+      formatBytes(payload.max_bytes),
+    ]],
+  };
 
-  showOverlayWithDescription(topicName, lines.join('\n'));
+  const minBps = computeBandwidthValue(payload.min_hz, payload.min_bytes);
+  const avgBps = payload.average_bps ?? computeBandwidthValue(payload.average_hz, payload.average_bytes_per_msg);
+  const maxBps = computeBandwidthValue(payload.max_hz, payload.max_bytes);
+
+  const bandwidthTable = {
+    title: 'Bandwidth (B/s)',
+    headers: ['Min', 'Avg', 'Max'],
+    rows: [[
+      formatBytesPerSecond(minBps),
+      formatBytesPerSecond(avgBps),
+      formatBytesPerSecond(maxBps),
+    ]],
+  };
+
+  showOverlayWithTables(topicName, {
+    titleLines,
+    tables: [frequencyTable, messageSizeTable, bandwidthTable],
+  });
 
   const peerInfo = target.peerName ? ` ↔ ${target.peerName}` : '';
   const actionLabel = action.charAt(0).toUpperCase() + action.slice(1);
@@ -598,40 +846,36 @@ function showNodeServicesOverlay(nodeName, payload) {
     return;
   }
 
-  const lines = [`Node: ${nodeName}`];
+  const titleLines = [`Node: ${nodeName}`];
   if (payload.namespace) {
-    lines.push(`Namespace: ${payload.namespace}`);
+    titleLines.push(`Namespace: ${payload.namespace}`);
   }
-  if (Array.isArray(payload.services) && payload.services.length) {
-    lines.push(`Services (${payload.services.length}):`);
-    payload.services.forEach(entry => {
-      const name = entry?.name ?? '(unknown)';
-      const types = Array.isArray(entry?.types) && entry.types.length
-        ? entry.types.join(', ')
-        : 'unknown type';
-      lines.push(`${name} (${types})`);
-    });
+  const rows = Array.isArray(payload.services)
+    ? payload.services.map(entry => {
+        const name = entry?.name ?? '(unknown)';
+        const types = Array.isArray(entry?.types) && entry.types.length
+          ? entry.types.join(', ')
+          : 'unknown type';
+        return [name, types];
+      })
+    : [];
+  const count = rows.length;
+
+  if (!rows.length) {
+    const lines = [...titleLines, 'No services available.'];
+    showOverlayWithDescription(nodeName, lines.join('\n'), false);
   } else {
-    lines.push('Services: (none)');
+    showOverlayWithTables(nodeName, {
+      titleLines,
+      tables: [
+        {
+          title: 'Services',
+          headers: ['Service', 'Type'],
+          rows,
+        },
+      ],
+    });
   }
-
-  let preferredWidth = 0;
-  overlayCtx.save();
-  overlayCtx.setTransform(1, 0, 0, 1, 0, 0);
-  overlayCtx.font = OVERLAY_FONT;
-  lines.forEach(line => {
-    const width = overlayCtx.measureText(line).width;
-    if (width > preferredWidth) {
-      preferredWidth = width;
-    }
-  });
-  overlayCtx.restore();
-  const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : canvas.width;
-  const maxAllowed = Math.max(OVERLAY_PADDING * 2 + 40, viewportWidth - 80);
-  const boxWidth = Math.min(maxAllowed, preferredWidth + OVERLAY_PADDING * 2 + 16);
-
-  showOverlayWithDescription(nodeName, lines.join('\n'), false, boxWidth);
-  const count = Array.isArray(payload.services) ? payload.services.length : 0;
   statusEl.textContent = `Services for ${nodeName}: ${count} found`;
 }
 
@@ -839,6 +1083,11 @@ function refreshOverlay() {
     hideOverlay();
     return;
   }
+  if (overlayState.table) {
+    const anchorPoint = layoutToView(geometry.center);
+    drawOverlayTables(anchorPoint, overlayState.table);
+    return;
+  }
   if (overlayState.auto) {
     overlayState.description = resolveOverlayDescription(overlayState.nodeName, geometry);
     overlayState.maxWidth = 0;
@@ -870,6 +1119,17 @@ function showOverlayWithDescription(nodeName, description, auto = false, maxWidt
   overlayState.description = description;
   overlayState.auto = auto;
   overlayState.maxWidth = Math.max(0, maxWidth || 0);
+  overlayState.table = null;
+  refreshOverlay();
+}
+
+function showOverlayWithTables(nodeName, tableData) {
+  overlayState.visible = true;
+  overlayState.nodeName = nodeName;
+  overlayState.description = '';
+  overlayState.auto = false;
+  overlayState.maxWidth = 0;
+  overlayState.table = tableData;
   refreshOverlay();
 }
 
