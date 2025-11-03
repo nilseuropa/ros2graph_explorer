@@ -13,7 +13,9 @@ from typing import Dict, Optional, Tuple, TYPE_CHECKING
 from urllib.parse import parse_qs
 
 if TYPE_CHECKING:  # pragma: no cover
-    from ..ros2_graph_node import GraphSnapshot
+    from ..graph import GraphSnapshot
+
+from ..graph import GraphSnapshot, layout
 
 
 class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -116,8 +118,11 @@ class GraphWebServer:
 
     def publish(self, snapshot: 'GraphSnapshot', fingerprint: str) -> None:
         graph_dict = snapshot.to_dict()
-        graphviz_ids = snapshot.graphviz_id_map()
-        plain_layout = self._compute_graphviz_plain(snapshot)
+        try:
+            dot_source, graphviz_ids = layout.generate_graphviz(snapshot)
+        except Exception:  # pragma: no cover - defensive fallback
+            dot_source, graphviz_ids = layout.generate_simple_graphviz(snapshot)
+        plain_layout = self._compute_graphviz_plain(dot_source)
         graphviz_info = {}
         if plain_layout is not None:
             graphviz_info['engine'] = 'dot'
@@ -251,7 +256,7 @@ class GraphWebServer:
             status = 500
         self._send_json(handler, status, payload)
 
-    def _compute_graphviz_plain(self, snapshot: 'GraphSnapshot') -> Optional[str]:
+    def _compute_graphviz_plain(self, dot_source: str) -> Optional[str]:
         if not self._dot_path:
             if not self._graphviz_warning_logged:
                 self._logger.warning(
@@ -263,7 +268,7 @@ class GraphWebServer:
         try:
             completed = subprocess.run(
                 [self._dot_path, '-Tplain'],
-                input=snapshot.to_dot(),
+                input=dot_source,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=True,
