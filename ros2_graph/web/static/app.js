@@ -1,61 +1,3 @@
-import {
-  VIEW_MIN_SCALE,
-  VIEW_MAX_SCALE,
-  ZOOM_SENSITIVITY,
-  BASE_STROKE_WIDTH,
-  MIN_STROKE_WIDTH,
-  MAX_STROKE_WIDTH,
-  SELECT_EDGE_COLOR,
-  SELECT_NODE_STROKE,
-  SELECT_NODE_FILL,
-  SELECT_TOPIC_STROKE,
-  SELECT_TOPIC_FILL,
-  HOVER_EDGE_COLOR,
-  HOVER_NODE_STROKE,
-  HOVER_NODE_FILL,
-  HOVER_TOPIC_STROKE,
-  HOVER_TOPIC_FILL,
-  MIN_ARROW_HEAD,
-  MAX_ARROW_HEAD,
-  PARAMETER_TYPES,
-  SERVICE_BOOLEAN_TYPES,
-  SERVICE_INTEGER_TYPES,
-  SERVICE_FLOAT_TYPES,
-  SERVICE_STRING_TYPES,
-  SERVICE_INTEGER_LIMITS,
-  BASE_FONT_FAMILY,
-  BASE_FONT_SIZE,
-  BASE_LINE_HEIGHT,
-  POINTS_PER_INCH,
-  MIN_FONT_SIZE_PX,
-  BASE_LINE_HEIGHT_RATIO,
-  OVERLAY_FONT,
-  OVERLAY_LINE_HEIGHT,
-  OVERLAY_PADDING,
-  OVERLAY_MAX_WIDTH,
-  OVERLAY_MARGIN,
-  TOPIC_TOOL_TIMEOUT,
-  TOPIC_ECHO_REFRESH_MS,
-  FEATURE_PARAM_ORDER,
-  FEATURE_LABELS,
-  HIDDEN_NAME_PATTERNS,
-} from './js/constants.js';
-import { GraphState } from './js/state.js';
-import { requestTopicTool, requestTopicEcho, requestNodeTool } from './js/api.js';
-
-const {
-  PARAMETER_NOT_SET,
-  PARAMETER_BOOL,
-  PARAMETER_INTEGER,
-  PARAMETER_DOUBLE,
-  PARAMETER_STRING,
-  PARAMETER_BYTE_ARRAY,
-  PARAMETER_BOOL_ARRAY,
-  PARAMETER_INTEGER_ARRAY,
-  PARAMETER_DOUBLE_ARRAY,
-  PARAMETER_STRING_ARRAY,
-} = PARAMETER_TYPES;
-
 const canvas = document.getElementById('graphCanvas');
 const ctx = canvas.getContext('2d');
 const overlayCanvas = document.getElementById('overlayCanvas');
@@ -63,10 +5,54 @@ const overlayCtx = overlayCanvas.getContext('2d');
 const metaEl = document.getElementById('meta');
 const statusEl = document.getElementById('status');
 const refreshBtn = document.getElementById('refreshBtn');
-
-const graphState = new GraphState();
-const viewState = graphState.view;
-const panState = graphState.pan;
+let lastGraph = null;
+let lastFingerprint = null;
+const viewState = {
+  scale: 1,
+  offsetX: 0,
+  offsetY: 0,
+};
+const VIEW_MIN_SCALE = 0.25;
+const VIEW_MAX_SCALE = 6;
+const ZOOM_SENSITIVITY = 0.0015;
+const BASE_STROKE_WIDTH = 1.5;
+const MIN_STROKE_WIDTH = 0.75;
+const MAX_STROKE_WIDTH = 2.5;
+const SELECT_EDGE_COLOR = '#ff9800';
+const SELECT_NODE_STROKE = '#ff9800';
+const SELECT_NODE_FILL = '#ffe6bf';
+const SELECT_TOPIC_STROKE = '#ff9800';
+const SELECT_TOPIC_FILL = '#d8f5d0';
+const HOVER_EDGE_COLOR = '#42a5f5';
+const HOVER_NODE_STROKE = '#42a5f5';
+const HOVER_NODE_FILL = '#d6ecff';
+const HOVER_TOPIC_STROKE = '#42a5f5';
+const HOVER_TOPIC_FILL = '#cbe8ff';
+const MIN_ARROW_HEAD = 4;
+const MAX_ARROW_HEAD = 18;
+let userAdjustedView = false;
+const panState = {
+  active: false,
+  pointerId: null,
+  lastX: 0,
+  lastY: 0,
+};
+let currentScene = {
+  nodes: new Map(),
+  edges: [],
+};
+let currentSelection = {
+  key: '',
+  nodes: new Set(),
+  edges: new Set(),
+};
+let hoverHighlight = {
+  key: '',
+  nodes: new Set(),
+  edges: new Set(),
+};
+let nodeDescriptions = new Map();
+const nodeFeatureInfo = new Map();
 const overlayState = {
   visible: false,
   nodeName: '',
@@ -78,6 +64,17 @@ const overlayState = {
   layout: null,
   scrollOffset: 0,
 };
+
+const PARAMETER_NOT_SET = 0;
+const PARAMETER_BOOL = 1;
+const PARAMETER_INTEGER = 2;
+const PARAMETER_DOUBLE = 3;
+const PARAMETER_STRING = 4;
+const PARAMETER_BYTE_ARRAY = 5;
+const PARAMETER_BOOL_ARRAY = 6;
+const PARAMETER_INTEGER_ARRAY = 7;
+const PARAMETER_DOUBLE_ARRAY = 8;
+const PARAMETER_STRING_ARRAY = 9;
 
 const parameterEditor = document.getElementById('parameterEditor');
 const parameterEditorForm = document.getElementById('parameterEditorForm');
@@ -139,6 +136,32 @@ const topicEchoState = {
   peerName: '',
   streamId: '',
   timer: null,
+};
+
+const SERVICE_BOOLEAN_TYPES = new Set(['bool', 'boolean']);
+const SERVICE_INTEGER_TYPES = new Set([
+  'int8',
+  'uint8',
+  'int16',
+  'uint16',
+  'int32',
+  'uint32',
+  'int64',
+  'uint64',
+  'byte',
+  'char',
+]);
+const SERVICE_FLOAT_TYPES = new Set(['float', 'float32', 'double', 'float64']);
+const SERVICE_STRING_TYPES = new Set(['string', 'wstring']);
+const SERVICE_INTEGER_LIMITS = {
+  int8: { min: -128, max: 127 },
+  uint8: { min: 0, max: 255 },
+  int16: { min: -32768, max: 32767 },
+  uint16: { min: 0, max: 65535 },
+  int32: { min: -2147483648, max: 2147483647 },
+  uint32: { min: 0, max: 4294967295 },
+  byte: { min: 0, max: 255 },
+  char: { min: 0, max: 255 },
 };
 
 function setOverlayPointerCapture(enabled) {
@@ -377,11 +400,33 @@ document.addEventListener('keydown', event => {
   }
 });
 const canvasContainer = document.getElementById('canvasContainer');
+const BASE_FONT_FAMILY = '"Times New Roman", serif';
+const BASE_FONT_SIZE = 14;
+const BASE_LINE_HEIGHT = 18;
+const POINTS_PER_INCH = 72;
+const MIN_FONT_SIZE_PX = 7;
+const BASE_LINE_HEIGHT_RATIO = BASE_LINE_HEIGHT / BASE_FONT_SIZE;
+const OVERLAY_FONT = '14.3px "Segoe UI", system-ui, -apple-system, sans-serif';
+const OVERLAY_LINE_HEIGHT = 18;
+const OVERLAY_PADDING = 12;
+const OVERLAY_MAX_WIDTH = 320;
+const OVERLAY_MARGIN = 12;
+const TOPIC_TOOL_TIMEOUT = 15000;
+const TOPIC_ECHO_REFRESH_MS = 750;
+const FEATURE_PARAM_ORDER = ['name', 'class', 'version', 'gui_version', 'state'];
+const FEATURE_LABELS = {
+  name: 'Name',
+  class: 'Class',
+  version: 'Version',
+  gui_version: 'GUI Version',
+  state: 'State',
+};
+
 function resetViewState() {
   viewState.scale = 1;
   viewState.offsetX = 0;
   viewState.offsetY = 0;
-  graphState.userAdjustedView = false;
+  userAdjustedView = false;
 }
 
 resetViewState();
@@ -2147,7 +2192,7 @@ async function handleContextMenuAction(action, target) {
   stopTopicEcho();
 
   if (target.type === 'topic-edge' || target.type === 'topic-node') {
-    const topicGeometry = graphState.scene.nodes?.get(target.topicName);
+    const topicGeometry = currentScene.nodes?.get(target.topicName);
     if (!topicGeometry) {
       statusEl.textContent = `Topic ${target.topicName} not visible in current layout`;
       return;
@@ -2198,21 +2243,21 @@ async function handleContextMenuAction(action, target) {
   }
 
   if (target.type === 'node') {
-    const nodeGeometry = graphState.scene.nodes?.get(target.nodeName);
+    const nodeGeometry = currentScene.nodes?.get(target.nodeName);
     if (!nodeGeometry) {
       statusEl.textContent = `Node ${target.nodeName} not visible in current layout`;
       return;
     }
 
     if (action === 'info') {
-      const cachedFeatureTable = graphState.nodeFeatureInfo.get(target.nodeName);
+      const cachedFeatureTable = nodeFeatureInfo.get(target.nodeName);
       if (cachedFeatureTable) {
         showOverlayWithTables(target.nodeName, cachedFeatureTable);
       } else {
         showOverlayForNode(target.nodeName, nodeGeometry);
       }
       statusEl.textContent = `Details shown for ${target.nodeName}`;
-      if (!graphState.nodeFeatureInfo.has(target.nodeName)) {
+      if (!nodeFeatureInfo.has(target.nodeName)) {
         void enrichNodeInfoOverlay(target.nodeName);
       }
       return;
@@ -2291,11 +2336,11 @@ function handleDocumentPointerDown(event) {
 }
 
 function resolveTopicEdgeTarget(edge) {
-  if (!edge || !graphState.scene?.nodes) {
+  if (!edge || !currentScene?.nodes) {
     return null;
   }
-  const startGeom = graphState.scene.nodes.get(edge.start);
-  const endGeom = graphState.scene.nodes.get(edge.end);
+  const startGeom = currentScene.nodes.get(edge.start);
+  const endGeom = currentScene.nodes.get(edge.end);
   if (startGeom?.type === 'topic') {
     return {
       type: 'topic-edge',
@@ -2343,23 +2388,133 @@ function validateContextMenuTarget() {
     return;
   }
   if (contextMenuState.target.type === 'topic-edge') {
-    const stillExists = graphState.scene.edges?.some(edge => edge.id === contextMenuState.target.edgeId);
+    const stillExists = currentScene.edges?.some(edge => edge.id === contextMenuState.target.edgeId);
     if (!stillExists) {
       hideContextMenu();
     }
     return;
   }
   if (contextMenuState.target.type === 'topic-node') {
-    if (!graphState.scene.nodes?.has(contextMenuState.target.topicName)) {
+    if (!currentScene.nodes?.has(contextMenuState.target.topicName)) {
       hideContextMenu();
     }
     return;
   }
   if (contextMenuState.target.type === 'node') {
-    if (!graphState.scene.nodes?.has(contextMenuState.target.nodeName)) {
+    if (!currentScene.nodes?.has(contextMenuState.target.nodeName)) {
       hideContextMenu();
     }
   }
+}
+
+async function requestTopicTool(action, topicName, peerName, options = {}) {
+  const params = new URLSearchParams();
+  params.set('action', action);
+  params.set('topic', topicName);
+  if (peerName) {
+    params.set('peer', peerName);
+  }
+  const extraParams = options?.params;
+  if (extraParams && typeof extraParams === 'object') {
+    Object.entries(extraParams).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) {
+        params.set(key, String(value));
+      }
+    });
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TOPIC_TOOL_TIMEOUT);
+  let response;
+  let payload = {};
+  try {
+    response = await fetch(`/topic_tool?${params.toString()}`, {
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    try {
+      payload = await response.json();
+    } catch (err) {
+      payload = {};
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!response?.ok) {
+    const message = payload?.error || `HTTP ${response?.status ?? 'error'}`;
+    throw new Error(message);
+  }
+  return payload;
+}
+
+async function requestTopicEcho(topicName, mode, streamId, peerName) {
+  const params = {};
+  if (mode) {
+    params.mode = mode;
+  }
+  if (streamId) {
+    params.stream = streamId;
+  }
+  return requestTopicTool('echo', topicName, peerName, { params });
+}
+
+async function requestNodeTool(action, nodeName, options = {}) {
+  const method = (options?.method || 'GET').toUpperCase();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TOPIC_TOOL_TIMEOUT);
+  let response;
+  let payload = {};
+  try {
+    if (method === 'GET') {
+      const params = new URLSearchParams();
+      params.set('action', action);
+      params.set('node', nodeName);
+      const extraParams = options?.params;
+      if (extraParams && typeof extraParams === 'object') {
+        Object.entries(extraParams).forEach(([key, value]) => {
+          if (value !== undefined && value !== null) {
+            params.set(key, String(value));
+          }
+        });
+      }
+      response = await fetch(`/node_tool?${params.toString()}`, {
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+    } else if (method === 'POST') {
+      const body = Object.assign({}, options?.body || {});
+      if (!Object.prototype.hasOwnProperty.call(body, 'action')) {
+        body.action = action;
+      }
+      if (!Object.prototype.hasOwnProperty.call(body, 'node')) {
+        body.node = nodeName;
+      }
+      response = await fetch('/node_tool', {
+        method: 'POST',
+        cache: 'no-store',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+    } else {
+      throw new Error(`unsupported method ${method}`);
+    }
+    try {
+      payload = await response.json();
+    } catch (err) {
+      payload = {};
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!response?.ok) {
+    const message = payload?.error || `HTTP ${response?.status ?? 'error'}`;
+    throw new Error(message);
+  }
+  return payload;
 }
 
 function showTopicMeasurementOverlay(action, target, payload) {
@@ -2367,7 +2522,7 @@ function showTopicMeasurementOverlay(action, target, payload) {
     statusEl.textContent = `No data returned for ${action} on ${target.topicName}`;
     return;
   }
-  const geometry = graphState.scene.nodes?.get(target.topicName);
+  const geometry = currentScene.nodes?.get(target.topicName);
   if (!geometry) {
     statusEl.textContent = `Received data for ${target.topicName}, but it is not visible.`;
     return;
@@ -2456,7 +2611,7 @@ function showNodeServicesOverlay(nodeName, payload) {
     statusEl.textContent = `No data returned for services on ${nodeName}`;
     return;
   }
-  const geometry = graphState.scene.nodes?.get(nodeName);
+  const geometry = currentScene.nodes?.get(nodeName);
   if (!geometry) {
     statusEl.textContent = `Received services for ${nodeName}, but it is not visible.`;
     return;
@@ -2556,7 +2711,7 @@ function updateNodeFeatureInfoFromParameters(nodeName, parameters) {
   });
 
   if (!tables.length) {
-    graphState.nodeFeatureInfo.delete(nodeName);
+    nodeFeatureInfo.delete(nodeName);
     return null;
   }
 
@@ -2564,7 +2719,7 @@ function updateNodeFeatureInfoFromParameters(nodeName, parameters) {
     titleLines: buildNodeTitleLines(nodeName),
     tables,
   };
-  graphState.nodeFeatureInfo.set(nodeName, data);
+  nodeFeatureInfo.set(nodeName, data);
   return data;
 }
 
@@ -2572,8 +2727,8 @@ async function enrichNodeInfoOverlay(nodeName) {
   if (!nodeName || !overlayState.visible || overlayState.nodeName !== nodeName) {
     return;
   }
-  if (graphState.nodeFeatureInfo.has(nodeName)) {
-    const cached = graphState.nodeFeatureInfo.get(nodeName);
+  if (nodeFeatureInfo.has(nodeName)) {
+    const cached = nodeFeatureInfo.get(nodeName);
     if (cached && overlayState.visible && overlayState.nodeName === nodeName) {
       showOverlayWithTables(nodeName, cached);
     }
@@ -2599,7 +2754,7 @@ function showNodeParametersOverlay(nodeName, payload) {
     statusEl.textContent = `No data returned for parameters on ${nodeName}`;
     return;
   }
-  const geometry = graphState.scene.nodes?.get(nodeName);
+  const geometry = currentScene.nodes?.get(nodeName);
   if (!geometry) {
     statusEl.textContent = `Received parameters for ${nodeName}, but it is not visible.`;
     return;
@@ -2686,8 +2841,8 @@ function setSelection(highlight, mode = 'replace') {
     newEdges = new Set();
   } else if (mode === 'toggle') {
     const normalised = normaliseHighlight(highlight);
-    newNodes = new Set(graphState.selection.nodes);
-    newEdges = new Set(graphState.selection.edges);
+    newNodes = new Set(currentSelection.nodes);
+    newEdges = new Set(currentSelection.edges);
     normalised.nodes.forEach(node => {
       if (newNodes.has(node)) {
         newNodes.delete(node);
@@ -2709,16 +2864,16 @@ function setSelection(highlight, mode = 'replace') {
   }
 
   const key = makeHighlightKey(Array.from(newNodes).sort(), Array.from(newEdges).sort());
-  if (key === graphState.selection.key) {
+  if (key === currentSelection.key) {
     return;
   }
-  graphState.selection = {
+  currentSelection = {
     key,
     nodes: newNodes,
     edges: newEdges,
   };
-  if (graphState.lastGraph) {
-    renderGraph(graphState.lastGraph, graphState.lastFingerprint);
+  if (lastGraph) {
+    renderGraph(lastGraph, lastFingerprint);
   }
 }
 
@@ -2728,12 +2883,12 @@ function clearHoverHighlight() {
 
 function setHoverHighlight(highlight) {
   const normalised = normaliseHighlight(highlight);
-  if (normalised.key === graphState.hover.key) {
+  if (normalised.key === hoverHighlight.key) {
     return;
   }
-  graphState.hover = normalised;
-  if (graphState.lastGraph) {
-    renderGraph(graphState.lastGraph, graphState.lastFingerprint);
+  hoverHighlight = normalised;
+  if (lastGraph) {
+    renderGraph(lastGraph, lastFingerprint);
   }
 }
 
@@ -2853,7 +3008,7 @@ function refreshOverlay() {
   if (!overlayState.visible) {
     return;
   }
-  const geometry = graphState.scene.nodes?.get(overlayState.nodeName);
+  const geometry = currentScene.nodes?.get(overlayState.nodeName);
   if (!geometry) {
     hideOverlay();
     return;
@@ -2872,10 +3027,10 @@ function refreshOverlay() {
 }
 
 function resolveOverlayDescription(nodeName, geometry) {
-  let description = graphState.nodeDescriptions.get(nodeName);
+  let description = nodeDescriptions.get(nodeName);
   if (!description) {
     if (geometry?.type === 'topic') {
-      description = buildTopicDescription(graphState.lastGraph, nodeName);
+      description = buildTopicDescription(lastGraph, nodeName);
     } else {
       description = buildDefaultNodeDescription(nodeName);
     }
@@ -3608,10 +3763,10 @@ function distancePointToSegment(point, a, b) {
 }
 
 function findNodeAt(point) {
-  if (!graphState.scene.nodes || !graphState.scene.nodes.size) {
+  if (!currentScene.nodes || !currentScene.nodes.size) {
     return null;
   }
-  for (const [name, geometry] of graphState.scene.nodes.entries()) {
+  for (const [name, geometry] of currentScene.nodes.entries()) {
     if (isPointInsideGeometry(geometry, point)) {
       return { name, geometry };
     }
@@ -3620,13 +3775,13 @@ function findNodeAt(point) {
 }
 
 function findEdgeAt(point) {
-  if (!graphState.scene.edges || !graphState.scene.edges.length) {
+  if (!currentScene.edges || !currentScene.edges.length) {
     return null;
   }
   const threshold = 8 / (viewState.scale || 1);
   let best = null;
   let bestDistance = Infinity;
-  graphState.scene.edges.forEach(edge => {
+  currentScene.edges.forEach(edge => {
     const pts = edge.points;
     if (!pts || pts.length < 2) {
       return;
@@ -3648,14 +3803,14 @@ function findEdgeAt(point) {
 function computeNodeHoverHighlight(name, geometry) {
   const nodes = new Set([name]);
   const edges = new Set();
-  if (!graphState.scene.edges) {
+  if (!currentScene.edges) {
     return { nodes, edges };
   }
-  graphState.scene.edges.forEach(edge => {
+  currentScene.edges.forEach(edge => {
     if (edge.start === name || edge.end === name) {
       edges.add(edge.id);
       const other = edge.start === name ? edge.end : edge.start;
-      const otherGeom = graphState.scene.nodes.get(other);
+      const otherGeom = currentScene.nodes.get(other);
       if (!otherGeom) {
         return;
       }
@@ -3682,7 +3837,7 @@ function computeEdgeHoverHighlight(edge) {
 }
 
 function updateHoverHighlight(event) {
-  if (!graphState.lastGraph || panState.active) {
+  if (!lastGraph || panState.active) {
     return;
   }
   const canvasPoint = getCanvasPoint(event);
@@ -3828,7 +3983,7 @@ function resizeCanvas() {
   overlayCanvas.width = canvas.width;
   overlayCanvas.height = canvas.height;
   hideContextMenu();
-  renderGraph(graphState.lastGraph, graphState.lastFingerprint);
+  renderGraph(lastGraph, lastFingerprint);
 }
 
 window.addEventListener('resize', resizeCanvas);
@@ -3846,6 +4001,8 @@ document.addEventListener('pointerdown', handleDocumentPointerDown);
 if (contextMenu) {
   contextMenu.addEventListener('click', handleContextMenuClick);
 }
+
+const HIDDEN_NAME_PATTERNS = [/\/rosout\b/i];
 
 function isHiddenGraphName(name) {
   if (!name) {
@@ -3970,13 +4127,13 @@ function buildTopicDescription(graph, topicName) {
   return lines.join('\n');
 }
 
-function renderGraph(graph, fingerprint = graphState.lastFingerprint) {
+function renderGraph(graph, fingerprint = lastFingerprint) {
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.restore();
   if (!graph) {
-    graphState.scene = {
+    currentScene = {
       nodes: new Map(),
       edges: [],
     };
@@ -3986,18 +4143,18 @@ function renderGraph(graph, fingerprint = graphState.lastFingerprint) {
   }
 
   if (fingerprint !== undefined && fingerprint !== null) {
-    if (fingerprint !== graphState.lastFingerprint && !graphState.userAdjustedView) {
+    if (fingerprint !== lastFingerprint && !userAdjustedView) {
       resetViewState();
     }
-    graphState.lastFingerprint = fingerprint;
+    lastFingerprint = fingerprint;
   }
 
-  graphState.lastGraph = graph;
-  graphState.nodeDescriptions = buildNodeDescriptions(graph);
+  lastGraph = graph;
+  nodeDescriptions = buildNodeDescriptions(graph);
   const availableNodes = new Set(graph.nodes || []);
-  for (const key of Array.from(graphState.nodeFeatureInfo.keys())) {
+  for (const key of Array.from(nodeFeatureInfo.keys())) {
     if (!availableNodes.has(key)) {
-      graphState.nodeFeatureInfo.delete(key);
+      nodeFeatureInfo.delete(key);
     }
   }
   const width = canvas.width;
@@ -4006,7 +4163,7 @@ function renderGraph(graph, fingerprint = graphState.lastFingerprint) {
   const topicNames = Object.keys(graph.topics || {}).filter(name => !isHiddenGraphName(name));
 
   if (!graph.graphviz?.plain) {
-    graphState.scene = {
+    currentScene = {
       nodes: new Map(),
       edges: [],
     };
@@ -4023,7 +4180,7 @@ function renderGraph(graph, fingerprint = graphState.lastFingerprint) {
 
   const layout = parseGraphvizPlain(graph.graphviz.plain);
   if (!layout) {
-    graphState.scene = {
+    currentScene = {
       nodes: new Map(),
       edges: [],
     };
@@ -4063,7 +4220,7 @@ function renderGraph(graph, fingerprint = graphState.lastFingerprint) {
 
   const scaler = createGraphvizScaler(layout, width, height);
   if (!scaler) {
-    graphState.scene = {
+    currentScene = {
       nodes: new Map(),
       edges: [],
     };
@@ -4113,7 +4270,7 @@ function renderGraph(graph, fingerprint = graphState.lastFingerprint) {
   });
 
   if (!geometryEntries.length) {
-    graphState.scene = {
+    currentScene = {
       nodes: new Map(),
       edges: [],
     };
@@ -4178,10 +4335,10 @@ function renderGraph(graph, fingerprint = graphState.lastFingerprint) {
 
   const edgeUsage = new Map();
   const sceneEdges = [];
-  const selectedNodes = graphState.selection.nodes;
-  const hoverNodes = graphState.hover.nodes;
-  const selectedEdges = graphState.selection.edges;
-  const hoverEdges = graphState.hover.edges;
+  const selectedNodes = currentSelection.nodes;
+  const hoverNodes = hoverHighlight.nodes;
+  const selectedEdges = currentSelection.edges;
+  const hoverEdges = hoverHighlight.edges;
 
   (graph.edges || []).forEach(edge => {
     const key = edge.start + '->' + edge.end;
@@ -4253,7 +4410,7 @@ function renderGraph(graph, fingerprint = graphState.lastFingerprint) {
   ctx.restore();
 
   const nodesMap = new Map(Object.entries(nodeGeometry));
-  graphState.scene = {
+  currentScene = {
     nodes: nodesMap,
     edges: sceneEdges,
   };
@@ -4262,7 +4419,7 @@ function renderGraph(graph, fingerprint = graphState.lastFingerprint) {
 }
 
 function handleWheel(event) {
-  if (!graphState.lastGraph) {
+  if (!lastGraph) {
     return;
   }
   event.preventDefault();
@@ -4281,13 +4438,13 @@ function handleWheel(event) {
   viewState.scale = targetScale;
   viewState.offsetX = point.x - baseX * targetScale;
   viewState.offsetY = point.y - baseY * targetScale;
-  graphState.userAdjustedView = true;
-  renderGraph(graphState.lastGraph, graphState.lastFingerprint);
+  userAdjustedView = true;
+  renderGraph(lastGraph, lastFingerprint);
   updateHoverHighlight(event);
 }
 
 function handlePointerDown(event) {
-  if (event.button !== 0 || !graphState.lastGraph) {
+  if (event.button !== 0 || !lastGraph) {
     return;
   }
   event.preventDefault();
@@ -4312,7 +4469,7 @@ function handlePointerDown(event) {
   panState.pointerId = event.pointerId;
   panState.lastX = point.x;
   panState.lastY = point.y;
-  graphState.userAdjustedView = true;
+  userAdjustedView = true;
   try {
     canvas.setPointerCapture(event.pointerId);
   } catch (err) {
@@ -4321,7 +4478,7 @@ function handlePointerDown(event) {
 }
 
 function handlePointerMove(event) {
-  if (!graphState.lastGraph) {
+  if (!lastGraph) {
     return;
   }
   if (panState.active && event.pointerId === panState.pointerId) {
@@ -4336,7 +4493,7 @@ function handlePointerMove(event) {
     panState.lastY = point.y;
     viewState.offsetX += dx;
     viewState.offsetY += dy;
-    renderGraph(graphState.lastGraph, graphState.lastFingerprint);
+    renderGraph(lastGraph, lastFingerprint);
     return;
   }
   updateHoverHighlight(event);
@@ -4371,7 +4528,7 @@ function handlePointerCancel(event) {
 
 function handleContextMenu(event) {
   event.preventDefault();
-  if (!graphState.lastGraph) {
+  if (!lastGraph) {
     return;
   }
   const canvasPoint = getCanvasPoint(event);
@@ -4407,7 +4564,7 @@ function handleContextMenu(event) {
 }
 
 function handleDoubleClick(event) {
-  if (!graphState.lastGraph) {
+  if (!lastGraph) {
     return;
   }
   event.preventDefault();
