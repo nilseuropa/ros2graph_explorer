@@ -62,6 +62,7 @@ const overlayState = {
   table: null,
   hoverRow: null,
   layout: null,
+  scrollOffset: 0,
 };
 
 const PARAMETER_NOT_SET = 0;
@@ -273,10 +274,57 @@ function handleOverlayPointerLeave() {
   }
 }
 
+function handleOverlayWheel(event) {
+  if (!overlayCanvas || !overlayState.visible) {
+    return;
+  }
+  const layout = overlayState.layout;
+  if (!layout || !layout.scrollable) {
+    return;
+  }
+  const rect = overlayCanvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) {
+    return;
+  }
+  const scaleX = overlayCanvas.width / rect.width;
+  const scaleY = overlayCanvas.height / rect.height;
+  const x = (event.clientX - rect.left) * scaleX;
+  const y = (event.clientY - rect.top) * scaleY;
+  const box = layout.box;
+  if (!box || !pointInRect(x, y, box)) {
+    return;
+  }
+  const maxScroll = layout.maxScroll || 0;
+  if (maxScroll <= 0) {
+    return;
+  }
+
+  event.preventDefault();
+  let delta = event.deltaY;
+  if (!Number.isFinite(delta) || delta === 0) {
+    return;
+  }
+  if (event.deltaMode === 1) {
+    const lineHeight = layout.rowHeight || OVERLAY_LINE_HEIGHT;
+    delta *= lineHeight;
+  } else if (event.deltaMode === 2) {
+    const boxHeight = layout.boxHeight || box.height || 1;
+    delta *= boxHeight;
+  }
+  const next = Math.min(maxScroll, Math.max(0, (overlayState.scrollOffset || 0) + delta));
+  if (next === overlayState.scrollOffset) {
+    return;
+  }
+  overlayState.scrollOffset = next;
+  refreshOverlay();
+  updateOverlayHoverPosition(x, y);
+}
+
 if (overlayCanvas) {
   overlayCanvas.addEventListener('pointermove', handleOverlayPointerMove);
   overlayCanvas.addEventListener('pointerleave', handleOverlayPointerLeave);
   overlayCanvas.addEventListener('pointerdown', handleOverlayPointerDown);
+  overlayCanvas.addEventListener('wheel', handleOverlayWheel, { passive: false });
 }
 const contextMenu = document.getElementById('contextMenu');
 const contextMenuState = {
@@ -501,9 +549,17 @@ function clearOverlayCanvas() {
 function drawOverlayTables(anchorPoint, data) {
   const tables = Array.isArray(data?.tables) ? data.tables.filter(Boolean) : [];
   const titleLines = Array.isArray(data?.titleLines) ? data.titleLines : [];
-  const layoutInfo = { box: null, tables: [] };
+  const layoutInfo = {
+    box: null,
+    tables: [],
+    scrollable: false,
+    scrollOffset: 0,
+    maxScroll: 0,
+    contentHeight: 0,
+  };
   if (!tables.length && !titleLines.length) {
     overlayState.layout = null;
+    overlayState.scrollOffset = 0;
     return;
   }
 
@@ -529,6 +585,16 @@ function drawOverlayTables(anchorPoint, data) {
   const containerWidth = Number.isFinite(containerWidthRaw) ? containerWidthRaw : 0;
   const maxContainerWidth = Math.max(viewportWidth, canvasWidth, containerWidth);
   const maxAllowedWidth = Math.max(OVERLAY_PADDING * 2 + 160, maxContainerWidth - OVERLAY_MARGIN * 2);
+
+  const viewportHeightRaw = typeof window !== 'undefined' ? window.innerHeight : overlayCanvas.height;
+  const viewportHeight = Number.isFinite(viewportHeightRaw) ? viewportHeightRaw : 0;
+  const canvasHeightRaw = overlayCanvas?.height;
+  const canvasHeight = Number.isFinite(canvasHeightRaw) ? canvasHeightRaw : viewportHeight;
+  const containerHeightRaw = canvasContainer?.clientHeight;
+  const containerHeight = Number.isFinite(containerHeightRaw) ? containerHeightRaw : 0;
+  const maxContainerHeight = Math.max(viewportHeight, canvasHeight, containerHeight);
+  const minAllowedHeight = OVERLAY_PADDING * 2 + rowHeight * 3;
+  const maxAllowedHeight = Math.max(minAllowedHeight, maxContainerHeight - OVERLAY_MARGIN * 2);
 
   let maxTitleWidth = 0;
   titleLines.forEach(line => {
@@ -598,7 +664,8 @@ function drawOverlayTables(anchorPoint, data) {
       const scale = Math.max(0.3, innerWidth / Math.max(info.rawWidth, 1));
       info.columnWidths = info.columnWidths.map(width => width * scale);
       info.spacing = info.spacing * scale;
-      info.rawWidth = info.columnWidths.reduce((sum, width) => sum + width, 0) + info.spacing * Math.max(0, info.columnCount - 1);
+      info.rawWidth =
+        info.columnWidths.reduce((sum, width) => sum + width, 0) + info.spacing * Math.max(0, info.columnCount - 1);
     }
   });
 
@@ -622,22 +689,37 @@ function drawOverlayTables(anchorPoint, data) {
   const bottomPadding = processedTables.length ? Math.max(rowHeight * 0.6, 10) : 0;
   totalTablesHeight += bottomPadding + rowHeight;
 
-  const boxHeight = paddingY * 2 + titleHeight + titleGap + totalTablesHeight;
+  const contentHeight = paddingY * 2 + titleHeight + titleGap + totalTablesHeight;
+  let boxHeight = Math.min(contentHeight, maxAllowedHeight);
+  if (!Number.isFinite(boxHeight) || boxHeight <= 0) {
+    boxHeight = Math.max(minAllowedHeight, rowHeight * 4);
+  }
 
   let boxX = anchorPoint.x + OVERLAY_MARGIN;
   let boxY = anchorPoint.y - boxHeight - OVERLAY_MARGIN;
-  if (boxX + boxWidth > overlayCanvas.width - OVERLAY_MARGIN) {
-    boxX = overlayCanvas.width - OVERLAY_MARGIN - boxWidth;
+  const maxX = overlayCanvas.width - OVERLAY_MARGIN;
+  if (boxX + boxWidth > maxX) {
+    boxX = maxX - boxWidth;
   }
   if (boxX < OVERLAY_MARGIN) {
     boxX = OVERLAY_MARGIN;
   }
+  const maxY = overlayCanvas.height - OVERLAY_MARGIN;
   if (boxY < OVERLAY_MARGIN) {
     boxY = anchorPoint.y + OVERLAY_MARGIN;
-    if (boxY + boxHeight > overlayCanvas.height - OVERLAY_MARGIN) {
-      boxY = overlayCanvas.height - OVERLAY_MARGIN - boxHeight;
+    if (boxY + boxHeight > maxY) {
+      boxY = maxY - boxHeight;
     }
   }
+  if (boxY < OVERLAY_MARGIN) {
+    boxY = OVERLAY_MARGIN;
+  }
+
+  const scrollable = contentHeight > boxHeight + 0.5;
+  const maxScroll = Math.max(0, contentHeight - boxHeight);
+  const rawScrollOffset = Number.isFinite(overlayState.scrollOffset) ? overlayState.scrollOffset : 0;
+  const scrollOffset = scrollable ? Math.min(maxScroll, Math.max(0, rawScrollOffset)) : 0;
+  overlayState.scrollOffset = scrollOffset;
 
   layoutInfo.box = {
     x: boxX,
@@ -645,6 +727,12 @@ function drawOverlayTables(anchorPoint, data) {
     width: boxWidth,
     height: boxHeight,
   };
+  layoutInfo.scrollable = scrollable;
+  layoutInfo.scrollOffset = scrollOffset;
+  layoutInfo.maxScroll = maxScroll;
+  layoutInfo.contentHeight = contentHeight;
+  layoutInfo.boxHeight = boxHeight;
+  layoutInfo.rowHeight = rowHeight;
 
   const radius = 10;
   overlayCtx.fillStyle = 'rgba(13, 17, 23, 0.95)';
@@ -664,7 +752,12 @@ function drawOverlayTables(anchorPoint, data) {
   overlayCtx.fill();
   overlayCtx.stroke();
 
-  let cursorY = boxY + paddingY + (titleLines.length ? rowHeight / 2 : 0);
+  overlayCtx.save();
+  overlayCtx.beginPath();
+  overlayCtx.rect(boxX, boxY, boxWidth, boxHeight);
+  overlayCtx.clip();
+
+  let cursorY = boxY + paddingY + (titleLines.length ? rowHeight / 2 : 0) - scrollOffset;
   overlayCtx.fillStyle = '#e6edf3';
   titleLines.forEach(line => {
     overlayCtx.fillText(line, boxX + paddingX, cursorY);
@@ -766,6 +859,24 @@ function drawOverlayTables(anchorPoint, data) {
 
   cursorY += bottomPadding;
 
+  overlayCtx.restore();
+
+  if (scrollable) {
+    const trackWidth = 4;
+    const trackX = boxX + boxWidth - trackWidth - 4;
+    const trackY = boxY + 6;
+    const trackHeight = Math.max(12, boxHeight - 12);
+    const progress = maxScroll > 0 ? scrollOffset / maxScroll : 0;
+    const thumbHeight = Math.max(18, trackHeight * (boxHeight / contentHeight));
+    const thumbTravel = Math.max(0, trackHeight - thumbHeight);
+    const thumbY = trackY + progress * thumbTravel;
+
+    overlayCtx.fillStyle = 'rgba(88, 166, 255, 0.18)';
+    overlayCtx.fillRect(trackX, trackY, trackWidth, trackHeight);
+    overlayCtx.fillStyle = 'rgba(88, 166, 255, 0.65)';
+    overlayCtx.fillRect(trackX, thumbY, trackWidth, thumbHeight);
+  }
+
   overlayState.layout = layoutInfo;
   overlayCtx.restore();
 }
@@ -784,6 +895,7 @@ function hideOverlay() {
   overlayState.table = null;
   overlayState.layout = null;
   overlayState.hoverRow = null;
+  overlayState.scrollOffset = 0;
   if (overlayCanvas) {
     overlayCanvas.style.cursor = 'default';
   }
@@ -3090,7 +3202,7 @@ function renderTopicEchoOverlay(topicName, payload) {
         echoStream: true,
       },
     },
-    { preserveEcho: true },
+    { preserveEcho: true, preserveScroll: true },
   );
 }
 
@@ -3196,6 +3308,7 @@ function showOverlayWithDescription(nodeName, description, auto = false, maxWidt
   overlayState.table = null;
   overlayState.layout = null;
   overlayState.hoverRow = null;
+  overlayState.scrollOffset = 0;
   setOverlayPointerCapture(true);
   refreshOverlay();
 }
@@ -3204,6 +3317,10 @@ function showOverlayWithTables(nodeName, tableData, options = {}) {
   if (!options?.preserveEcho) {
     stopTopicEcho();
   }
+  const shouldResetScroll =
+    !overlayState.visible ||
+    overlayState.nodeName !== nodeName ||
+    !options?.preserveScroll;
   overlayState.visible = true;
   overlayState.nodeName = nodeName;
   overlayState.description = '';
@@ -3212,6 +3329,9 @@ function showOverlayWithTables(nodeName, tableData, options = {}) {
   overlayState.table = tableData;
   overlayState.layout = null;
   overlayState.hoverRow = null;
+  if (shouldResetScroll) {
+    overlayState.scrollOffset = 0;
+  }
   setOverlayPointerCapture(true);
   refreshOverlay();
 }
