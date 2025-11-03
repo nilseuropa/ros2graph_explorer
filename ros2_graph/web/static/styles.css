@@ -251,6 +251,18 @@ textarea {
   color: rgba(230, 237, 243, 0.75);
 }
 
+.parameter-editor__description {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  background: rgba(63, 185, 80, 0.08);
+  border: 1px solid rgba(63, 185, 80, 0.2);
+  font-size: 0.92rem;
+  line-height: 1.5;
+  color: rgba(230, 237, 243, 0.95);
+  white-space: pre-wrap;
+}
+
 .parameter-editor__current {
   padding: 0.5rem 0.6rem;
   border-radius: 6px;

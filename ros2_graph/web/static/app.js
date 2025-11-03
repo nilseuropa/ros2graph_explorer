@@ -1109,7 +1109,13 @@ function openParameterEditor(nodeName, entry, parameterDetail, warningMessage) {
   if (parameterEditorBody) {
     parameterEditorBody.innerHTML = '';
     if (descriptor?.description) {
-      parameterEditorBody.append(createHintElement(String(descriptor.description)));
+      const descriptionText = String(descriptor.description).trim();
+      if (descriptionText) {
+        const descriptionBlock = document.createElement('div');
+        descriptionBlock.className = 'parameter-editor__description';
+        descriptionBlock.textContent = descriptionText;
+        parameterEditorBody.append(descriptionBlock);
+      }
     }
     if (warningMessage) {
       parameterEditorBody.append(createHintElement(`Metadata limited: ${warningMessage}`));
