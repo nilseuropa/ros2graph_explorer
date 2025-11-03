@@ -105,11 +105,17 @@ function setOverlayHover(nextHover) {
 
 function updateOverlayHoverPosition(x, y) {
   if (!overlayState.visible || !overlayState.table || !overlayState.layout) {
+    if (overlayCanvas) {
+      overlayCanvas.style.cursor = 'default';
+    }
     setOverlayHover(null);
     return;
   }
   const { box, tables } = overlayState.layout;
   if (!box || !pointInRect(x, y, box)) {
+    if (overlayCanvas) {
+      overlayCanvas.style.cursor = 'default';
+    }
     setOverlayHover(null);
     return;
   }
@@ -138,6 +144,10 @@ function updateOverlayHoverPosition(x, y) {
       }
     }
   }
+  if (overlayCanvas) {
+    const parameterIndex = findParameterRowIndexAtPosition(x, y);
+    overlayCanvas.style.cursor = parameterIndex !== null ? 'pointer' : 'default';
+  }
   setOverlayHover(hover);
 }
 
@@ -159,6 +169,9 @@ function handleOverlayPointerMove(event) {
 
 function handleOverlayPointerLeave() {
   setOverlayHover(null);
+  if (overlayCanvas) {
+    overlayCanvas.style.cursor = 'default';
+  }
 }
 
 if (overlayCanvas) {
@@ -603,13 +616,18 @@ function hideOverlay() {
   overlayState.table = null;
   overlayState.layout = null;
   overlayState.hoverRow = null;
+  if (overlayCanvas) {
+    overlayCanvas.style.cursor = 'default';
+  }
   clearOverlayCanvas();
   setOverlayPointerCapture(false);
 }
 
 function handleOverlayPointerDown(event) {
+  if (!overlayCanvas) {
+    return;
+  }
   event.stopPropagation();
-  event.preventDefault();
   if (!overlayState.visible || !overlayState.layout) {
     return;
   }
@@ -627,42 +645,22 @@ function handleOverlayPointerDown(event) {
   const x = (event.clientX - rect.left) * scaleX;
   const y = (event.clientY - rect.top) * scaleY;
   if (!pointInRect(x, y, box)) {
+    event.preventDefault();
     hideOverlay();
   }
 }
 
-function handleOverlayDoubleClick(event) {
-  if (!overlayCanvas) {
-    return;
-  }
-  if (!overlayState.visible || !overlayState.layout || !overlayState.table) {
-    return;
-  }
+function findParameterRowIndexAtPosition(x, y) {
   const parameterEntries = overlayState.table?.context?.parameters;
   if (!Array.isArray(parameterEntries) || parameterEntries.length === 0) {
-    return;
+    return null;
   }
-  const tables = Array.isArray(overlayState.layout.tables) ? overlayState.layout.tables : [];
-  if (!tables.length) {
-    return;
-  }
+  const tables = Array.isArray(overlayState.layout?.tables) ? overlayState.layout.tables : [];
   const dataTables = Array.isArray(overlayState.table.tables) ? overlayState.table.tables : [];
-  if (!dataTables.length) {
-    return;
+  if (!tables.length || !dataTables.length) {
+    return null;
   }
-
-  event.preventDefault();
-  event.stopPropagation();
-
-  const rect = overlayCanvas.getBoundingClientRect();
-  if (!rect.width || !rect.height) {
-    return;
-  }
-  const scaleX = overlayCanvas.width / rect.width;
-  const scaleY = overlayCanvas.height / rect.height;
-  const x = (event.clientX - rect.left) * scaleX;
-  const y = (event.clientY - rect.top) * scaleY;
-
+  let rowOffset = 0;
   for (let tableIndex = 0; tableIndex < tables.length; tableIndex += 1) {
     const layout = tables[tableIndex];
     const tableData = dataTables[tableIndex];
@@ -679,21 +677,49 @@ function handleOverlayDoubleClick(event) {
     }
     const columnBounds = Array.isArray(layout.columnBounds) ? layout.columnBounds : [];
     const valueBounds = columnBounds[1];
-    if (!valueBounds) {
+    const rowRects = Array.isArray(layout.rows) ? layout.rows : [];
+    const rowCount = rowRects.length;
+    if (!valueBounds || x < valueBounds.start || x > valueBounds.end) {
+      rowOffset += rowCount;
       continue;
     }
-    if (x < valueBounds.start || x > valueBounds.end) {
-      continue;
-    }
-    const rows = Array.isArray(layout.rows) ? layout.rows : [];
-    for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
-      const rowRect = rows[rowIndex];
+    for (let rowIndex = 0; rowIndex < rowRects.length; rowIndex += 1) {
+      const rowRect = rowRects[rowIndex];
       if (pointInRect(x, y, rowRect)) {
-        void editParameterValue(rowIndex);
-        return;
+        const entryIndex = rowOffset + rowIndex;
+        if (entryIndex >= 0 && entryIndex < parameterEntries.length) {
+          return entryIndex;
+        }
+        return null;
       }
     }
+    rowOffset += rowCount;
   }
+  return null;
+}
+
+function handleOverlayDoubleClick(event) {
+  if (!overlayCanvas) {
+    return;
+  }
+  event.stopPropagation();
+  if (!overlayState.visible || !overlayState.layout || !overlayState.table) {
+    return;
+  }
+  const rect = overlayCanvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) {
+    return;
+  }
+  const scaleX = overlayCanvas.width / rect.width;
+  const scaleY = overlayCanvas.height / rect.height;
+  const x = (event.clientX - rect.left) * scaleX;
+  const y = (event.clientY - rect.top) * scaleY;
+  const parameterIndex = findParameterRowIndexAtPosition(x, y);
+  if (parameterIndex === null) {
+    return;
+  }
+  event.preventDefault();
+  void editParameterValue(parameterIndex);
 }
 
 async function editParameterValue(rowIndex) {
@@ -1383,7 +1409,11 @@ function showNodeParametersOverlay(nodeName, payload) {
   }
 
   updateNodeFeatureInfoFromParameters(nodeName, parameterEntries);
-  statusEl.textContent = `Parameters for ${nodeName}: ${count} found`;
+  if (count) {
+    statusEl.textContent = `Parameters for ${nodeName}: ${count} found (double-click a value to edit)`;
+  } else {
+    statusEl.textContent = `Parameters for ${nodeName}: ${count} found`;
+  }
 }
 
 function toGraphSpace(point) {
