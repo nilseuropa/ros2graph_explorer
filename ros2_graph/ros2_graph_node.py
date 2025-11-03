@@ -16,12 +16,14 @@ from rclpy.serialization import serialize_message
 from .web import GraphWebServer
 
 try:
-    from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue  # type: ignore
-    from rcl_interfaces.srv import GetParameters, ListParameters, SetParameters  # type: ignore
+    from rcl_interfaces.msg import Parameter, ParameterDescriptor, ParameterType, ParameterValue  # type: ignore
+    from rcl_interfaces.srv import DescribeParameters, GetParameters, ListParameters, SetParameters  # type: ignore
 except ImportError:  # pragma: no cover - allows docs/tests without ROS deps
     Parameter = None  # type: ignore[assignment]
+    ParameterDescriptor = None  # type: ignore[assignment]
     ParameterType = None  # type: ignore[assignment]
     ParameterValue = None  # type: ignore[assignment]
+    DescribeParameters = None  # type: ignore[assignment]
     GetParameters = None  # type: ignore[assignment]
     ListParameters = None  # type: ignore[assignment]
     SetParameters = None  # type: ignore[assignment]
@@ -464,6 +466,49 @@ def _truncate_parameter_display(value: str, limit: int = PARAMETER_DISPLAY_MAX) 
     return text[: limit - 3] + '...'
 
 
+def _parameter_descriptor_to_dict(descriptor) -> Optional[Dict[str, object]]:
+    if descriptor is None:
+        return None
+    data: Dict[str, object] = {}
+    name = getattr(descriptor, 'name', '') or ''
+    if name:
+        data['name'] = str(name)
+    type_id = getattr(descriptor, 'type', None)
+    if isinstance(type_id, int):
+        data['type_id'] = type_id
+        data['type'] = _parameter_type_label(type_id)
+    description = getattr(descriptor, 'description', '') or ''
+    if description:
+        data['description'] = str(description)
+    constraints = getattr(descriptor, 'additional_constraints', '') or ''
+    if constraints:
+        data['additional_constraints'] = str(constraints)
+    data['read_only'] = bool(getattr(descriptor, 'read_only', False))
+    data['dynamic_typing'] = bool(getattr(descriptor, 'dynamic_typing', False))
+
+    integer_ranges = []
+    for item in list(getattr(descriptor, 'integer_range', []) or []):
+        integer_ranges.append({
+            'from_value': int(getattr(item, 'from_value', 0)),
+            'to_value': int(getattr(item, 'to_value', 0)),
+            'step': int(getattr(item, 'step', 0)),
+        })
+    if integer_ranges:
+        data['integer_ranges'] = integer_ranges
+
+    float_ranges = []
+    for item in list(getattr(descriptor, 'floating_point_range', []) or []):
+        float_ranges.append({
+            'from_value': float(getattr(item, 'from_value', 0.0)),
+            'to_value': float(getattr(item, 'to_value', 0.0)),
+            'step': float(getattr(item, 'step', 0.0)),
+        })
+    if float_ranges:
+        data['floating_point_ranges'] = float_ranges
+
+    return data
+
+
 def _parse_parameter_input(param_type: Optional[int], raw_value: object) -> object:
     if not isinstance(param_type, int):
         raise ValueError('unknown parameter type')
@@ -798,6 +843,31 @@ class Ros2GraphNode(Node):
 
         return parameters
 
+    def _describe_parameter_for_node(
+        self,
+        base: str,
+        namespace: str,
+        name: str,
+    ) -> Optional[Dict[str, object]]:
+        if DescribeParameters is None:
+            raise RuntimeError('parameter description service unavailable')
+        fully_qualified = _fully_qualified_node_name(namespace, base)
+        describe_service = f'{fully_qualified}/describe_parameters'
+        request = DescribeParameters.Request()
+        request.names = [name]
+
+        response = self._call_parameter_service(
+            DescribeParameters,
+            describe_service,
+            request,
+            timeout=self._parameter_service_timeout,
+        )
+        descriptors = list(getattr(response, 'descriptors', []) or [])
+        if not descriptors:
+            return None
+        descriptor = descriptors[0]
+        return _parameter_descriptor_to_dict(descriptor)
+
     def _set_parameter_for_node(
         self,
         base: str,
@@ -868,7 +938,7 @@ class Ros2GraphNode(Node):
         payload: Optional[Dict[str, object]] = None,
     ) -> Tuple[int, Dict[str, object]]:
         action = (action or '').lower()
-        if action not in {'services', 'parameters', 'set_parameter'}:
+        if action not in {'services', 'parameters', 'set_parameter', 'describe_parameter'}:
             return 400, {'error': f"unsupported action '{action}'"}
 
         snapshot = self._last_snapshot
@@ -926,6 +996,41 @@ class Ros2GraphNode(Node):
                 'base': base,
                 'parameters': parameters,
                 'count': len(parameters),
+            }
+
+        if action == 'describe_parameter':
+            if DescribeParameters is None:
+                return 503, {'error': 'parameter description service unavailable'}
+            details = dict(payload or {})
+            param_name = str(details.get('name') or '').strip()
+            if not param_name:
+                return 400, {'error': 'missing parameter name'}
+            try:
+                descriptor = self._describe_parameter_for_node(base, namespace, param_name)
+            except TimeoutError as exc:
+                self.get_logger().warning(f'Parameter describe timed out for {node_name}/{param_name}: {exc}')
+                return 504, {'error': str(exc)}
+            except Exception as exc:  # pragma: no cover - defensive
+                self.get_logger().warning(f'Failed to describe parameter {param_name} for {node_name}: {exc}')
+                return 500, {'error': str(exc)}
+            if descriptor is None:
+                return 404, {'error': f'parameter {param_name} not found'}
+            type_id = None
+            if isinstance(descriptor, dict):
+                raw_type_id = descriptor.get('type_id')
+                if isinstance(raw_type_id, int):
+                    type_id = raw_type_id
+            return 200, {
+                'action': action,
+                'node': node_name,
+                'namespace': namespace,
+                'base': base,
+                'parameter': {
+                    'name': param_name,
+                    'type_id': type_id,
+                    'type': _parameter_type_label(type_id),
+                    'descriptor': descriptor,
+                },
             }
 
         if action == 'set_parameter':
