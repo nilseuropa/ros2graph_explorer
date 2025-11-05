@@ -57,7 +57,7 @@ ros2 run ros2_graph ros2_graph \
 The client lives entirely in `ros2_graph/web/static`. Point your browser at the node and
 you’ll see a two-layer canvas (graph + overlay) and a status bar describing the latest
 interaction.
-![Canvas](doc/graph_canvas.png)
+![Canvas](doc/ros2_graph.png)
 
 ### Canvas Basics
 
@@ -71,6 +71,13 @@ interaction.
   Services, Parameters). The menu anchors to your pointer.
 
 ### Node & Topic Overlays
+### Floating Overlays
+
+- You can open multiple overlays at once;
+- Drag the title bar to reposition an overlay anywhere on the canvas. Press `Esc` to close the active overlay stack.
+- Use the corner handle (small blue triangle, bottom right) to resize overlays. The width and height persist while the overlay stays open, so long message payloads are easier to read.
+- Click the × button in the title bar to close just that overlay.
+
 
 **Info (nodes/topics)** – Shows namespaces, endpoint counts, and recent metadata in a
   floating card. The overlay tracks the node even if you pan the view.
