@@ -73,7 +73,7 @@ header h1 {
 }
 
 #contextMenu {
-  position: absolute;
+  position: fixed;
   display: none;
   flex-direction: column;
   gap: 0;

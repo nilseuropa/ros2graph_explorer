@@ -58,11 +58,47 @@ export class ContextMenu {
     this.target = target;
     this.visible = true;
     if (point) {
-      const { x, y } = point;
-      this.element.style.left = `${Math.round(x)}px`;
-      this.element.style.top = `${Math.round(y)}px`;
+      this.positionAt(point);
     }
     toggleHidden(this.element, false);
     this.element.classList.add('visible');
+  }
+
+  positionAt(point) {
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const baseLeft =
+      typeof point.clientX === 'number'
+        ? point.clientX
+        : typeof point.pageX === 'number'
+        ? point.pageX - window.scrollX
+        : 0;
+    const baseTop =
+      typeof point.clientY === 'number'
+        ? point.clientY
+        : typeof point.pageY === 'number'
+        ? point.pageY - window.scrollY
+        : 0;
+
+    const previousDisplay = this.element.style.display;
+    const previousVisibility = this.element.style.visibility;
+    this.element.style.display = 'flex';
+    this.element.style.visibility = 'hidden';
+    this.element.style.left = '0px';
+    this.element.style.top = '0px';
+
+    const menuWidth = this.element.offsetWidth || 0;
+    const menuHeight = this.element.offsetHeight || 0;
+
+    const maxLeft = viewportWidth - menuWidth;
+    const maxTop = viewportHeight - menuHeight;
+
+    const finalLeft = Math.max(0, Math.min(baseLeft, maxLeft));
+    const finalTop = Math.max(0, Math.min(baseTop, maxTop));
+
+    this.element.style.left = `${Math.round(finalLeft)}px`;
+    this.element.style.top = `${Math.round(finalTop)}px`;
+    this.element.style.visibility = previousVisibility || '';
+    this.element.style.display = previousDisplay || '';
   }
 }

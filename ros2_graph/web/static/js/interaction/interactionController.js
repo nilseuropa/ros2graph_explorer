@@ -384,8 +384,13 @@ export class InteractionController {
     }
     const contextMenu = this.options.contextMenu;
     if (contextMenu) {
-      const screenPoint = { x: event.clientX, y: event.clientY };
-      contextMenu.toggle(true, screenPoint, target);
+      const point = {
+        clientX: event.clientX,
+        clientY: event.clientY,
+        pageX: event.pageX,
+        pageY: event.pageY,
+      };
+      contextMenu.toggle(true, point, target);
     }
   }
 
