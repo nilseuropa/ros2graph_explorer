@@ -105,7 +105,27 @@ export class Store {
   }
 
   setHover(hover) {
-    this.hover = hover || null;
+    if (!hover) {
+      this.hover = null;
+      this.emit('hover', this.hover);
+      return;
+    }
+    const cloneSet = source => {
+      if (!source) {
+        return new Set();
+      }
+      if (source instanceof Set) {
+        return new Set(source);
+      }
+      return new Set(Array.isArray(source) ? source : []);
+    };
+    const next = {
+      primary: hover.primary ?? null,
+      nodes: cloneSet(hover.nodes),
+      topics: cloneSet(hover.topics),
+      edges: cloneSet(hover.edges),
+    };
+    this.hover = next;
     this.emit('hover', this.hover);
   }
 

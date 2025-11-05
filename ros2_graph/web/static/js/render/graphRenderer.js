@@ -75,12 +75,12 @@ export class GraphRenderer {
     const { ctx } = this;
     const strokeWidth = this.getStrokeWidth();
     const selectedEdges = this.selection?.edges ?? new Set();
-    const hoverEdgeKey = this.hover?.type === 'edge' ? this.hover.key : null;
+    const hoverEdges = this.hover?.edges ?? new Set();
 
     for (const edge of this.scene.edges) {
       const key = `${edge.tail}->${edge.head}`;
       const isSelected = selectedEdges.has(key);
-      const isHover = hoverEdgeKey === key;
+      const isHover = hoverEdges.has(key);
       ctx.save();
       ctx.lineWidth = strokeWidth;
       ctx.strokeStyle = isSelected
@@ -126,14 +126,14 @@ export class GraphRenderer {
     const { ctx } = this;
     const selectedNodes = this.selection?.nodes ?? new Set();
     const selectedTopics = this.selection?.topics ?? new Set();
-    const hoverNode = this.hover?.type === 'node' ? this.hover.name : null;
-    const hoverTopic = this.hover?.type === 'topic' ? this.hover.name : null;
+    const hoverNodes = this.hover?.nodes ?? new Set();
+    const hoverTopics = this.hover?.topics ?? new Set();
 
     this.scene.nodes.forEach((geometry, name) => {
       this.ensureLabelFits(geometry, 16, true);
       const highlight = selectedNodes.has(name)
         ? { stroke: SELECT_NODE.stroke, fill: SELECT_NODE.fill }
-        : hoverNode === name
+        : hoverNodes.has(name)
         ? { stroke: HOVER_NODE.stroke, fill: HOVER_NODE.fill }
         : { stroke: geometry.strokeColor || '#1f2328', fill: geometry.fillColor || '#9ebaff' };
       this.drawEllipse(geometry, highlight);
@@ -143,7 +143,7 @@ export class GraphRenderer {
       this.ensureLabelFits(geometry, 20, false);
       const highlight = selectedTopics.has(name)
         ? { stroke: SELECT_TOPIC.stroke, fill: SELECT_TOPIC.fill }
-        : hoverTopic === name
+        : hoverTopics.has(name)
         ? { stroke: HOVER_TOPIC.stroke, fill: HOVER_TOPIC.fill }
         : { stroke: geometry.strokeColor || '#1f2328', fill: geometry.fillColor || '#b8e1b3' };
       this.drawRoundedRect(geometry, highlight);

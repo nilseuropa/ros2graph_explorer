@@ -284,6 +284,20 @@ export class InteractionController {
     return selection;
   }
 
+  expandHover(target) {
+    if (!target) {
+      return null;
+    }
+    const normalized = normalizeTarget(target);
+    const selection = this.expandSelection(target);
+    return {
+      primary: normalized,
+      nodes: new Set(selection.nodes),
+      topics: new Set(selection.topics),
+      edges: new Set(selection.edges),
+    };
+  }
+
   handlePointerDown(event) {
     if (event.button === 0) {
       event.preventDefault();
@@ -294,7 +308,7 @@ export class InteractionController {
       if (target) {
         const mode = event.ctrlKey || event.metaKey ? 'toggle' : event.shiftKey ? 'add' : 'replace';
         this.selectTarget(target, mode);
-        this.store.setHover(normalizeTarget(target));
+        this.store.setHover(this.expandHover(target));
         this.options.overlay?.hide?.();
         this.options.topicEcho?.stop?.({ quiet: true });
       } else {
@@ -321,7 +335,7 @@ export class InteractionController {
     }
     const target = this.resolveTarget(event);
     if (target) {
-      this.store.setHover(normalizeTarget(target));
+      this.store.setHover(this.expandHover(target));
     } else {
       this.store.setHover(null);
     }
@@ -366,7 +380,7 @@ export class InteractionController {
     const target = this.resolveTarget(event);
     if (target) {
       this.selectTarget(target, event.ctrlKey || event.metaKey ? 'toggle' : event.shiftKey ? 'add' : 'replace');
-      this.store.setHover(normalizeTarget(target));
+      this.store.setHover(this.expandHover(target));
     }
     const contextMenu = this.options.contextMenu;
     if (contextMenu) {
