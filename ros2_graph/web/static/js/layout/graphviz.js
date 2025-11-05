@@ -127,12 +127,22 @@ export function createLayoutScaler(layout, canvasWidth, canvasHeight) {
   const offsetX = (canvasWidth - scaledCanvasWidth) / 2;
   const offsetY = (canvasHeight - scaledCanvasHeight) / 2;
 
+  const nodeHeights = Array.from(
+    layout.nodes instanceof Map ? layout.nodes.values() : Object.values(layout.nodes || {}),
+  ).map(node => Number(node.height) || 0);
+  const avgNodeHeight = nodeHeights.length ? nodeHeights.reduce((sum, h) => sum + h, 0) / nodeHeights.length : 0;
+  const averagePixelHeight = avgNodeHeight * layoutScale * scale;
+  const verticalMultiplier = averagePixelHeight > 0 ? 1 + Math.min(1.2, 0.35 * (averagePixelHeight / 20)) : 1.25;
+
   return {
     scale,
     toCanvas({ x, y }) {
+      const baseY = offsetY + y * layoutScale * scale;
+      const offsetFromCenter = y - layout.height / 2;
+      const extra = offsetFromCenter * layoutScale * scale * (verticalMultiplier - 1);
       return {
         x: offsetX + x * layoutScale * scale,
-        y: canvasHeight - (offsetY + y * layoutScale * scale),
+        y: canvasHeight - baseY - extra,
       };
     },
     scaleLength(value) {
