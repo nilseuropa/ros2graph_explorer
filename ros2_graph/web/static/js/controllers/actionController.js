@@ -10,6 +10,13 @@ const FEATURE_LABELS = {
   state: 'State',
 };
 
+const buildOverlayId = (type, ...parts) => [type, ...parts.filter(Boolean)].join(':');
+const nodeInfoOverlayId = nodeName => buildOverlayId('node-info', nodeName);
+const nodeParametersOverlayId = nodeName => buildOverlayId('node-parameters', nodeName);
+const nodeServicesOverlayId = nodeName => buildOverlayId('node-services', nodeName);
+const topicInfoOverlayId = topicName => buildOverlayId('topic-info', topicName);
+const topicStatsOverlayId = (topicName, peerName) => buildOverlayId('topic-stats', topicName, peerName);
+
 export class ActionController {
   constructor({
     store,
@@ -30,8 +37,6 @@ export class ActionController {
     this.serviceCaller = serviceCaller;
     this.topicEcho = topicEcho;
     this.nodeFeatureCache = new Map();
-    this.activeNodeInfo = null;
-
     if (this.overlay?.setActionHandler) {
       this.overlay.setActionHandler(action => this.handleOverlayAction(action));
     }
@@ -40,9 +45,6 @@ export class ActionController {
   async handleAction(action, target) {
     if (!action || !target) {
       return;
-    }
-    if (action !== 'node-info') {
-      this.activeNodeInfo = null;
     }
     if (action !== 'topic-echo') {
       await this.topicEcho?.stop({ quiet: true });
@@ -79,12 +81,12 @@ export class ActionController {
   async showNodeInfo(nodeName) {
     const graph = this.store.getGraph();
     const summary = getNodeSummary(graph, nodeName);
+    const overlayId = nodeInfoOverlayId(nodeName);
     if (!summary) {
-      this.overlay?.hide();
+      this.overlay?.hide({ id: overlayId });
       this.statusBar?.setStatus(`No data for ${nodeName}`);
       return;
     }
-    this.activeNodeInfo = nodeName;
     const cachedFeatures = this.nodeFeatureCache.get(nodeName) || [];
     this.renderNodeInfo(nodeName, summary, cachedFeatures);
     if (!this.nodeFeatureCache.has(nodeName)) {
@@ -100,21 +102,25 @@ export class ActionController {
 
   presentParameters(nodeName, payload) {
     const parameters = Array.isArray(payload?.parameters) ? payload.parameters : [];
+    const overlayId = nodeParametersOverlayId(nodeName);
     const rows = parameters.map(entry => ({
       cells: [entry.name ?? '(unknown)', summarizeValue(entry.value)],
       action: { type: 'edit-parameter', nodeName, parameter: entry },
     }));
-    this.overlay?.show({
-      title: `Parameters (${rows.length})`,
-      subtitle: nodeName,
-      sections: [
-        {
-          type: 'table',
-          headers: ['Name', 'Value'],
-          rows,
-        },
-      ],
-    });
+    this.overlay?.show(
+      {
+        title: `Parameters (${rows.length})`,
+        subtitle: nodeName,
+        sections: [
+          {
+            type: 'table',
+            headers: ['Name', 'Value'],
+            rows,
+          },
+        ],
+      },
+      { id: overlayId },
+    );
     this.statusBar?.setStatus(`Parameters for ${nodeName}: ${rows.length} found`);
   }
 
@@ -122,29 +128,34 @@ export class ActionController {
     this.statusBar?.setStatus(`Fetching services for ${nodeName}…`);
     const payload = await this.nodeApi.get('services', nodeName);
     const services = Array.isArray(payload?.services) ? payload.services : [];
+    const overlayId = nodeServicesOverlayId(nodeName);
     const rows = services.map(entry => ({
       cells: [entry.name ?? '(unknown)', formatTypes(entry.types)],
       action: { type: 'call-service', nodeName, service: entry },
     }));
-    this.overlay?.show({
-      title: `Services (${rows.length})`,
-      subtitle: nodeName,
-      sections: [
-        {
-          type: 'table',
-          headers: ['Service', 'Type'],
-          rows,
-        },
-      ],
-    });
+    this.overlay?.show(
+      {
+        title: `Services (${rows.length})`,
+        subtitle: nodeName,
+        sections: [
+          {
+            type: 'table',
+            headers: ['Service', 'Type'],
+            rows,
+          },
+        ],
+      },
+      { id: overlayId },
+    );
     this.statusBar?.setStatus(`Services for ${nodeName}: ${rows.length} found`);
   }
 
   async showTopicInfo(topicName) {
     const graph = this.store.getGraph();
     const summary = getTopicSummary(graph, topicName);
+    const overlayId = topicInfoOverlayId(topicName);
     if (!summary) {
-      this.overlay?.hide();
+      this.overlay?.hide({ id: overlayId });
       this.statusBar?.setStatus(`No data for ${topicName}`);
       return;
     }
@@ -178,11 +189,14 @@ export class ActionController {
         rows: subscribers,
       });
     }
-    this.overlay?.show({
-      title: topicName,
-      subtitle: 'Topic overview',
-      sections,
-    });
+    this.overlay?.show(
+      {
+        title: topicName,
+        subtitle: 'Topic overview',
+        sections,
+      },
+      { id: overlayId },
+    );
     this.statusBar?.setStatus(`Info shown for ${topicName}`);
   }
 
@@ -191,6 +205,7 @@ export class ActionController {
     const params = peerName ? { peer: peerName } : undefined;
     const payload = await this.topicApi.request('stats', topicName, { params });
     const sections = [];
+    const overlayId = topicStatsOverlayId(topicName, peerName);
     sections.push({
       type: 'table',
       title: 'Frequency',
@@ -229,11 +244,14 @@ export class ActionController {
         },
       ],
     });
-    this.overlay?.show({
-      title: topicName,
-      subtitle: peerName ? `Peer: ${peerName}` : 'Topic statistics',
-      sections,
-    });
+    this.overlay?.show(
+      {
+        title: topicName,
+        subtitle: peerName ? `Peer: ${peerName}` : 'Topic statistics',
+        sections,
+      },
+      { id: overlayId },
+    );
     this.statusBar?.setStatus(`Statistics ready for ${topicName}`);
   }
 
@@ -249,6 +267,7 @@ export class ActionController {
     if (!summary) {
       return;
     }
+    const overlayId = nodeInfoOverlayId(nodeName);
     const sections = featureSections.length
       ? featureSections
       : [
@@ -258,11 +277,14 @@ export class ActionController {
             text: ['No feature descriptor available.'],
           },
         ];
-    this.overlay?.show({
-      title: nodeName,
-      subtitle: `Namespace: ${summary.namespace}`,
-      sections,
-    });
+    this.overlay?.show(
+      {
+        title: nodeName,
+        subtitle: `Namespace: ${summary.namespace}`,
+        sections,
+      },
+      { id: overlayId },
+    );
     this.statusBar?.setStatus(`Details shown for ${nodeName}`);
   }
 
@@ -271,7 +293,8 @@ export class ActionController {
       const payload = await this.nodeApi.get('parameters', nodeName);
       const sections = buildFeatureSectionsFromParameters(payload?.parameters);
       this.nodeFeatureCache.set(nodeName, sections);
-      if (this.activeNodeInfo === nodeName) {
+      const overlayId = nodeInfoOverlayId(nodeName);
+      if (this.overlay?.isOpen?.(overlayId)) {
         const latestSummary = summary ?? getNodeSummary(this.store.getGraph(), nodeName);
         if (latestSummary) {
           this.renderNodeInfo(nodeName, latestSummary, sections);

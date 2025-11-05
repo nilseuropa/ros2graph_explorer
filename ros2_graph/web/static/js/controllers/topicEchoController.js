@@ -1,6 +1,7 @@
 import { formatHz, formatBytesPerSecond } from '../utils/format.js';
 
 const POLL_INTERVAL_MS = 1000;
+const buildEchoOverlayId = (topicName, peerName) => ['topic-echo', topicName, peerName].filter(Boolean).join(':');
 
 export class TopicEchoController {
   constructor({ topicApi, overlay, statusBar }) {
@@ -13,6 +14,7 @@ export class TopicEchoController {
       peerName: null,
       streamId: null,
       timer: null,
+      overlayId: null,
     };
   }
 
@@ -28,6 +30,7 @@ export class TopicEchoController {
       peerName: peerName || null,
       streamId: null,
       timer: null,
+      overlayId: buildEchoOverlayId(topicName, peerName),
     };
     try {
       const payload = await this.topicApi.echo(topicName, {
@@ -61,14 +64,16 @@ export class TopicEchoController {
         /* ignore stop errors */
       }
     }
+    const overlayId = this.state.overlayId;
     this.state = {
       active: false,
       topicName: null,
       peerName: null,
       streamId: null,
       timer: null,
+      overlayId: null,
     };
-    this.overlay?.hide();
+    this.overlay?.hide({ id: overlayId });
     if (!quiet) {
       this.statusBar?.setStatus('Echo stopped');
     }
@@ -122,11 +127,14 @@ export class TopicEchoController {
     }
     const messages = payload.count ?? 0;
     subtitleParts.push(`Messages: ${messages}`);
-    this.overlay?.show({
-      title: `Echo: ${topicName}`,
-      subtitle: subtitleParts.join(' • '),
-      sections: buildEchoSections(payload),
-    });
+    this.overlay?.show(
+      {
+        title: `Echo: ${topicName}`,
+        subtitle: subtitleParts.join(' • '),
+        sections: buildEchoSections(payload),
+      },
+      { id: this.state.overlayId || buildEchoOverlayId(topicName, this.state.peerName) },
+    );
     if (payload.sample) {
       const timestampSource = payload.sample.received_at;
       const iso = payload.sample.received_iso;

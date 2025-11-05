@@ -309,11 +309,9 @@ export class InteractionController {
         const mode = event.ctrlKey || event.metaKey ? 'toggle' : event.shiftKey ? 'add' : 'replace';
         this.selectTarget(target, mode);
         this.store.setHover(this.expandHover(target));
-        this.options.overlay?.hide?.();
         this.options.topicEcho?.stop?.({ quiet: true });
       } else {
         this.store.resetSelection();
-        this.options.overlay?.hide?.();
         this.options.topicEcho?.stop?.({ quiet: true });
         const point = this.getCanvasPoint(event);
         this.view.beginPan(event.pointerId, point);
@@ -370,7 +368,6 @@ export class InteractionController {
     event.preventDefault();
     this.store.resetSelection();
     this.store.setHover(null);
-    this.options.overlay?.hide?.();
     this.options.topicEcho?.stop?.({ quiet: true });
     this.clearActiveSelections();
   }
