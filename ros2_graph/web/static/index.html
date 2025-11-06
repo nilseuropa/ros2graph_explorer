@@ -48,7 +48,60 @@
           &times;
         </button>
       </header>
-      <div id="settingsOverlayBody" class="settings-overlay__body"></div>
+      <div id="settingsOverlayBody" class="settings-overlay__body">
+        <form id="settingsForm" class="settings-form" autocomplete="off">
+          <fieldset class="settings-form__fieldset">
+            <legend>Theme</legend>
+            <label class="settings-form__option">
+              <input type="radio" name="settingsTheme" value="dark">
+              <span>Dark</span>
+            </label>
+            <label class="settings-form__option">
+              <input type="radio" name="settingsTheme" value="light">
+              <span>Light</span>
+            </label>
+            <label class="settings-form__option">
+              <input type="radio" name="settingsTheme" value="custom">
+              <span>Custom</span>
+            </label>
+          </fieldset>
+          <section id="customThemeSection" class="settings-form__custom" hidden>
+            <p class="settings-form__note">Adjust the palette to build a custom theme. Changes apply instantly while custom mode is active.</p>
+            <div class="settings-form__field">
+              <label for="customThemeScheme">Base variant</label>
+              <select id="customThemeScheme">
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+              </select>
+            </div>
+            <div class="settings-form__colors">
+              <label class="settings-form__color" for="customBg">
+                <span>Background</span>
+                <input type="color" id="customBg" name="customBg" value="#0d1117">
+              </label>
+              <label class="settings-form__color" for="customPanel">
+                <span>Panel</span>
+                <input type="color" id="customPanel" name="customPanel" value="#161b22">
+              </label>
+              <label class="settings-form__color" for="customText">
+                <span>Text</span>
+                <input type="color" id="customText" name="customText" value="#e6edf3">
+              </label>
+              <label class="settings-form__color" for="customAccent">
+                <span>Accent</span>
+                <input type="color" id="customAccent" name="customAccent" value="#3fb950">
+              </label>
+              <label class="settings-form__color" for="customAccentSecondary">
+                <span>Accent&nbsp;Secondary</span>
+                <input type="color" id="customAccentSecondary" name="customAccentSecondary" value="#58a6ff">
+              </label>
+            </div>
+            <div class="settings-form__actions">
+              <button type="button" id="customThemeReset" class="secondary">Reset custom theme</button>
+            </div>
+          </section>
+        </form>
+      </div>
     </div>
   </div>
   <div id="parameterEditor" class="parameter-editor hidden" aria-hidden="true">

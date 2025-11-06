@@ -15,6 +15,7 @@ import { NodeToolsApi } from './api/nodeToolsApi.js';
 import { TopicToolsApi } from './api/topicToolsApi.js';
 import { ActionController } from './controllers/actionController.js';
 import { TopicEchoController } from './controllers/topicEchoController.js';
+import { ThemeManager } from './ui/themeManager.js';
 
 const canvas = document.getElementById('graphCanvas');
 const overlayCanvas = document.getElementById('overlayCanvas');
@@ -27,6 +28,18 @@ const settingsBtn = document.getElementById('settingsBtn');
 const settingsOverlay = document.getElementById('settingsOverlay');
 const settingsOverlayDialog = document.getElementById('settingsOverlayDialog');
 const settingsOverlayClose = document.getElementById('settingsOverlayClose');
+const settingsOverlayBody = document.getElementById('settingsOverlayBody');
+
+const {
+  form: settingsForm,
+  customSection: customThemeSection,
+  schemeSelect: customThemeScheme,
+  resetButton: customThemeResetBtn,
+  colorInputs: customThemeInputs,
+} = ensureSettingsForm(settingsOverlayBody);
+
+const themeManager = new ThemeManager();
+themeManager.init();
 
 const store = new Store();
 const renderer = new GraphRenderer(canvas);
@@ -68,16 +81,135 @@ const interactionController = new InteractionController(canvas, store, viewContr
   topicEcho: topicEchoController,
 });
 
+themeManager.subscribe(updateSettingsForm);
+updateSettingsForm();
+
 let refreshTimer = null;
+
+function ensureSettingsForm(container) {
+  if (!container) {
+    return {
+      form: null,
+      customSection: null,
+      schemeSelect: null,
+      resetButton: null,
+      colorInputs: {},
+    };
+  }
+  if (!container.querySelector('#settingsForm')) {
+    container.innerHTML = `
+      <form id="settingsForm" class="settings-form" autocomplete="off">
+        <fieldset class="settings-form__fieldset">
+          <legend>Theme</legend>
+          <label class="settings-form__option">
+            <input type="radio" name="settingsTheme" value="dark">
+            <span>Dark</span>
+          </label>
+          <label class="settings-form__option">
+            <input type="radio" name="settingsTheme" value="light">
+            <span>Light</span>
+          </label>
+          <label class="settings-form__option">
+            <input type="radio" name="settingsTheme" value="custom">
+            <span>Custom</span>
+          </label>
+        </fieldset>
+        <section id="customThemeSection" class="settings-form__custom" hidden>
+          <p class="settings-form__note">
+            Adjust the palette to build a custom theme. Changes apply instantly while custom mode is active.
+          </p>
+          <div class="settings-form__field">
+            <label for="customThemeScheme">Base variant</label>
+            <select id="customThemeScheme">
+              <option value="dark">Dark</option>
+              <option value="light">Light</option>
+            </select>
+          </div>
+          <div class="settings-form__colors">
+            <label class="settings-form__color" for="customBg">
+              <span>Background</span>
+              <input type="color" id="customBg" name="customBg" value="#0d1117">
+            </label>
+            <label class="settings-form__color" for="customPanel">
+              <span>Panel</span>
+              <input type="color" id="customPanel" name="customPanel" value="#161b22">
+            </label>
+            <label class="settings-form__color" for="customText">
+              <span>Text</span>
+              <input type="color" id="customText" name="customText" value="#e6edf3">
+            </label>
+            <label class="settings-form__color" for="customAccent">
+              <span>Accent</span>
+              <input type="color" id="customAccent" name="customAccent" value="#3fb950">
+            </label>
+            <label class="settings-form__color" for="customAccentSecondary">
+              <span>Accent Secondary</span>
+              <input type="color" id="customAccentSecondary" name="customAccentSecondary" value="#58a6ff">
+            </label>
+          </div>
+          <div class="settings-form__actions">
+            <button type="button" id="customThemeReset" class="secondary">Reset custom theme</button>
+          </div>
+        </section>
+      </form>
+    `;
+  }
+  const form = container.querySelector('#settingsForm');
+  const customSection = container.querySelector('#customThemeSection');
+  const schemeSelect = container.querySelector('#customThemeScheme');
+  const resetButton = container.querySelector('#customThemeReset');
+  const colorInputs = {
+    bg: container.querySelector('#customBg'),
+    panel: container.querySelector('#customPanel'),
+    text: container.querySelector('#customText'),
+    accent: container.querySelector('#customAccent'),
+    accentSecondary: container.querySelector('#customAccentSecondary'),
+  };
+  return { form, customSection, schemeSelect, resetButton, colorInputs };
+}
 
 function isSettingsOverlayOpen() {
   return Boolean(settingsOverlay?.classList.contains('active'));
+}
+
+function updateSettingsForm(state = themeManager.getState()) {
+  if (!settingsForm) {
+    return;
+  }
+  const theme = state?.theme ?? themeManager.getTheme();
+  const custom = state?.custom ?? themeManager.getState().custom;
+  const themeRadios = settingsForm.querySelectorAll("input[name='settingsTheme']");
+  themeRadios.forEach(radio => {
+    radio.checked = radio.value === theme;
+  });
+  const isCustom = theme === 'custom';
+  if (customThemeSection) {
+    customThemeSection.hidden = !isCustom;
+  }
+  if (customThemeScheme) {
+    customThemeScheme.value = custom?.scheme ?? 'dark';
+    customThemeScheme.disabled = !isCustom;
+  }
+  if (customThemeResetBtn) {
+    customThemeResetBtn.disabled = !isCustom;
+  }
+  for (const [key, input] of Object.entries(customThemeInputs)) {
+    if (!input) {
+      continue;
+    }
+    input.disabled = !isCustom;
+    const value = custom?.colors?.[key];
+    if (value) {
+      input.value = value;
+    }
+  }
 }
 
 function openSettingsOverlay() {
   if (!settingsOverlay) {
     return;
   }
+  updateSettingsForm();
   settingsOverlay.classList.add('active');
   settingsOverlay.setAttribute('aria-hidden', 'false');
   if (settingsBtn) {
@@ -101,6 +233,43 @@ function closeSettingsOverlay() {
     settingsBtn.setAttribute('aria-expanded', 'false');
     settingsBtn.focus();
   }
+}
+
+function handleSettingsFormChange(event) {
+  const target = event.target;
+  if (!target) {
+    return;
+  }
+  if (target instanceof HTMLInputElement && target.name === 'settingsTheme') {
+    themeManager.setTheme(target.value);
+    return;
+  }
+  if (target === customThemeScheme) {
+    if (themeManager.getTheme() !== 'custom') {
+      themeManager.setTheme('custom');
+    }
+    themeManager.setCustomScheme(customThemeScheme.value);
+  }
+}
+
+function handleSettingsFormInput(event) {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement) || target.type !== 'color') {
+    return;
+  }
+  for (const [key, input] of Object.entries(customThemeInputs)) {
+    if (input === target) {
+      if (themeManager.getTheme() !== 'custom') {
+        themeManager.setTheme('custom');
+      }
+      themeManager.setCustomColor(key, target.value);
+      break;
+    }
+  }
+}
+
+function handleCustomThemeReset() {
+  themeManager.resetCustomTheme();
 }
 
 function resizeCanvas() {
@@ -249,6 +418,13 @@ function init() {
     settingsOverlayClose.addEventListener('click', () => {
       closeSettingsOverlay();
     });
+  }
+  if (settingsForm) {
+    settingsForm.addEventListener('change', handleSettingsFormChange);
+    settingsForm.addEventListener('input', handleSettingsFormInput);
+  }
+  if (customThemeResetBtn) {
+    customThemeResetBtn.addEventListener('click', handleCustomThemeReset);
   }
   renderer.setView(store.getView());
   renderer.setSelection(store.getSelection());
