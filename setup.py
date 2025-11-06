@@ -1,18 +1,25 @@
+from pathlib import Path
+
 from setuptools import find_packages, setup
 
 package_name = 'ros2_graph'
+
+
+def collect_static_files():
+    base_dir = Path(__file__).parent
+    static_root = base_dir / package_name / 'web' / 'static'
+    return [
+        str(path.relative_to(base_dir / package_name))
+        for path in static_root.rglob('*')
+        if path.is_file()
+    ]
+
 
 setup(
     name=package_name,
     version='0.0.0',
     packages=find_packages(exclude=['test']),
-    package_data={
-        package_name: [
-            'web/static/*.html',
-            'web/static/*.css',
-            'web/static/*.js',
-        ],
-    },
+    package_data={package_name: collect_static_files()},
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
