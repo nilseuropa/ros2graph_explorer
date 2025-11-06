@@ -1,7 +1,22 @@
 const STORAGE_THEME_KEY = 'ros2_graph.theme';
 const STORAGE_CUSTOM_KEY = 'ros2_graph.theme.custom';
 
-const CUSTOM_COLOR_KEYS = ['bg', 'panel', 'text', 'accent', 'accentSecondary'];
+const CUSTOM_COLOR_KEYS = [
+  'bg',
+  'panel',
+  'text',
+  'accent',
+  'accentSecondary',
+  'graphEdge',
+  'graphEdgeHover',
+  'graphEdgeSelect',
+  'graphNodeFill',
+  'graphNodeHover',
+  'graphNodeSelect',
+  'graphTopicFill',
+  'graphTopicHover',
+  'graphTopicSelect',
+];
 
 const BUILTIN_THEMES = {
   dark: {
@@ -13,6 +28,15 @@ const BUILTIN_THEMES = {
       text: '#e6edf3',
       accent: '#3fb950',
       accentSecondary: '#58a6ff',
+      graphEdge: '#3a4b5e',
+      graphEdgeHover: '#5cb2ff',
+      graphEdgeSelect: '#ffab3d',
+      graphNodeFill: '#2b4a65',
+      graphNodeHover: '#3f6d90',
+      graphNodeSelect: '#4b7da1',
+      graphTopicFill: '#14202c',
+      graphTopicHover: '#162331',
+      graphTopicSelect: '#1f2e41',
     },
   },
   light: {
@@ -24,6 +48,15 @@ const BUILTIN_THEMES = {
       text: '#1f2328',
       accent: '#2da44e',
       accentSecondary: '#0969da',
+      graphEdge: '#667085',
+      graphEdgeHover: '#1f6feb',
+      graphEdgeSelect: '#bd561d',
+      graphNodeFill: '#d6e5ff',
+      graphNodeHover: '#c6dbff',
+      graphNodeSelect: '#ffe2c2',
+      graphTopicFill: '#eef6ff',
+      graphTopicHover: '#e0edf9',
+      graphTopicSelect: '#ffeddc',
     },
   },
 };
@@ -148,6 +181,11 @@ export class ThemeManager {
     this.themeName = 'dark';
     this.customTheme = cloneThemeConfig(DEFAULT_CUSTOM_THEME);
     this.listeners = new Set();
+    this.activeTheme = {
+      name: 'dark',
+      scheme: BUILTIN_THEMES.dark.scheme,
+      colors: { ...BUILTIN_THEMES.dark.colors },
+    };
   }
 
   init() {
@@ -205,6 +243,7 @@ export class ThemeManager {
             scheme: BUILTIN_THEMES[target].scheme,
             colors: { ...BUILTIN_THEMES[target].colors },
           };
+    this.activeTheme = theme;
     this.applyThemeToDom(theme);
     if (!silent) {
       this.notify();
@@ -229,6 +268,15 @@ export class ThemeManager {
     setRgbProperty(style, '--accent-rgb', theme.colors.accent);
     setColorProperty(style, '--accent-secondary', theme.colors.accentSecondary);
     setRgbProperty(style, '--accent-secondary-rgb', theme.colors.accentSecondary);
+    setColorProperty(style, '--graph-edge', theme.colors.graphEdge);
+    setColorProperty(style, '--graph-edge-hover', theme.colors.graphEdgeHover);
+    setColorProperty(style, '--graph-edge-select', theme.colors.graphEdgeSelect);
+    setColorProperty(style, '--graph-node-fill', theme.colors.graphNodeFill);
+    setColorProperty(style, '--graph-node-hover', theme.colors.graphNodeHover);
+    setColorProperty(style, '--graph-node-select', theme.colors.graphNodeSelect);
+    setColorProperty(style, '--graph-topic-fill', theme.colors.graphTopicFill);
+    setColorProperty(style, '--graph-topic-hover', theme.colors.graphTopicHover);
+    setColorProperty(style, '--graph-topic-select', theme.colors.graphTopicSelect);
 
     const scheme = theme.scheme === 'light' ? 'light' : 'dark';
     const set = SHADOWS[scheme] ?? SHADOWS.dark;
@@ -256,6 +304,32 @@ export class ThemeManager {
     return {
       theme: this.themeName,
       custom: cloneThemeConfig(this.customTheme),
+      graphPalette: this.getGraphPalette(),
+    };
+  }
+
+  getGraphPalette() {
+    const theme = this.activeTheme ?? {
+      name: this.themeName,
+      scheme: BUILTIN_THEMES[this.themeName]?.scheme ?? 'dark',
+      colors: {
+        ...BUILTIN_THEMES[this.themeName]?.colors,
+      },
+    };
+    return {
+      edge: theme.colors.graphEdge,
+      edgeHover: theme.colors.graphEdgeHover,
+      edgeSelect: theme.colors.graphEdgeSelect,
+      node: {
+        baseFill: theme.colors.graphNodeFill,
+        hoverFill: theme.colors.graphNodeHover,
+        selectFill: theme.colors.graphNodeSelect,
+      },
+      topic: {
+        baseFill: theme.colors.graphTopicFill,
+        hoverFill: theme.colors.graphTopicHover,
+        selectFill: theme.colors.graphTopicSelect,
+      },
     };
   }
 
