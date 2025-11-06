@@ -8,10 +8,24 @@ import {
   HOVER_NODE,
   HOVER_TOPIC,
   HOVER_EDGE_COLOR,
+  BASE_EDGE_COLOR,
+  BASE_FONT_FAMILY,
 } from '../constants/index.js';
 import { arrowHeadSize, drawLabel } from '../layout/graphviz.js';
 import { computeFitView } from './sceneBuilder.js';
-import { BASE_FONT_FAMILY } from '../constants/index.js';
+
+const DEFAULT_NODE_FILL = '#2b4a65';
+const DEFAULT_TOPIC_FILL = '#14202c';
+const MAX_NODE_LUMINANCE = 0.42;
+
+const NAMED_COLOR_MAP = {
+  white: '#ffffff',
+  black: '#000000',
+  lightgray: '#d3d3d3',
+  lightgrey: '#d3d3d3',
+  gray: '#808080',
+  grey: '#808080',
+};
 
 export class GraphRenderer {
   constructor(canvas) {
@@ -158,7 +172,7 @@ export class GraphRenderer {
         ? SELECT_EDGE_COLOR
         : isHover
         ? HOVER_EDGE_COLOR
-        : '#2c3846';
+        : BASE_EDGE_COLOR;
       ctx.fillStyle = ctx.strokeStyle;
       ctx.beginPath();
       const [first, ...rest] = points;
@@ -493,7 +507,7 @@ export class GraphRenderer {
         ? { stroke: SELECT_NODE.stroke, fill: SELECT_NODE.fill }
         : hoverNodes.has(name)
         ? { stroke: HOVER_NODE.stroke, fill: HOVER_NODE.fill }
-        : { stroke: geometry.strokeColor || '#1f2328', fill: geometry.fillColor || '#9ebaff' };
+        : { stroke: BASE_EDGE_COLOR, fill: ensureNodeFill(geometry.fillColor) };
       this.drawEllipse(geometry, highlight);
     });
 
@@ -502,7 +516,7 @@ export class GraphRenderer {
         ? { stroke: SELECT_TOPIC.stroke, fill: SELECT_TOPIC.fill }
         : hoverTopics.has(name)
         ? { stroke: HOVER_TOPIC.stroke, fill: HOVER_TOPIC.fill }
-        : { stroke: geometry.strokeColor || '#1f2328', fill: geometry.fillColor || '#b8e1b3' };
+        : { stroke: BASE_EDGE_COLOR, fill: ensureTopicFill(geometry.fillColor) };
       this.drawRoundedRect(geometry, highlight);
     });
   }
@@ -597,4 +611,90 @@ export class GraphRenderer {
     geometry.lineHeight = lineHeight;
     geometry.fontSize = fontSize;
   }
+}
+
+function ensureNodeFill(color) {
+  const parsed = parseCssColor(color);
+  if (!parsed) {
+    return DEFAULT_NODE_FILL;
+  }
+  const luminance = relativeLuminance(parsed);
+  if (luminance > MAX_NODE_LUMINANCE) {
+    return DEFAULT_NODE_FILL;
+  }
+  return rgbToHex(parsed);
+}
+
+function ensureTopicFill(_color) {
+  return DEFAULT_TOPIC_FILL;
+}
+
+function parseCssColor(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed || trimmed === 'none') {
+    return null;
+  }
+  if (NAMED_COLOR_MAP[trimmed]) {
+    return parseHexColor(NAMED_COLOR_MAP[trimmed]);
+  }
+  if (trimmed.startsWith('#')) {
+    return parseHexColor(trimmed);
+  }
+  const rgbMatch = trimmed.match(/^rgba?\(\s*([0-9]+)\s*,\s*([0-9]+)\s*,\s*([0-9]+)(?:\s*,\s*([0-9.]+))?\s*\)$/);
+  if (rgbMatch) {
+    return {
+      r: clampChannel(parseInt(rgbMatch[1], 10)),
+      g: clampChannel(parseInt(rgbMatch[2], 10)),
+      b: clampChannel(parseInt(rgbMatch[3], 10)),
+    };
+  }
+  return null;
+}
+
+function parseHexColor(value) {
+  const hex = value.startsWith('#') ? value.slice(1) : value;
+  if (hex.length === 3) {
+    const r = parseInt(hex[0] + hex[0], 16);
+    const g = parseInt(hex[1] + hex[1], 16);
+    const b = parseInt(hex[2] + hex[2], 16);
+    return { r, g, b };
+  }
+  if (hex.length === 6) {
+    const r = parseInt(hex.slice(0, 2), 16);
+    const g = parseInt(hex.slice(2, 4), 16);
+    const b = parseInt(hex.slice(4, 6), 16);
+    if ([r, g, b].some(channel => Number.isNaN(channel))) {
+      return null;
+    }
+    return { r, g, b };
+  }
+  return null;
+}
+
+function clampChannel(value) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(255, value));
+}
+
+function relativeLuminance({ r, g, b }) {
+  const [rl, gl, bl] = [r, g, b].map(channel => {
+    const srgb = channel / 255;
+    return srgb <= 0.04045 ? srgb / 12.92 : ((srgb + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * rl + 0.7152 * gl + 0.0722 * bl;
+}
+
+function rgbToHex({ r, g, b }) {
+  return `#${channelToHex(r)}${channelToHex(g)}${channelToHex(b)}`;
+}
+
+function channelToHex(value) {
+  const clamped = clampChannel(value);
+  const hex = clamped.toString(16);
+  return hex.length === 1 ? `0${hex}` : hex;
 }

@@ -11,29 +11,29 @@ export const MAX_STROKE_WIDTH = 2.5;
 export const MIN_ARROW_HEAD = 4;
 export const MAX_ARROW_HEAD = 18;
 
+export const BASE_EDGE_COLOR = '#3a4b5e';
+export const SELECT_EDGE_COLOR = '#ffab3d';
+export const HOVER_EDGE_COLOR = '#5cb2ff';
+
 export const SELECT_NODE = {
-  stroke: '#ff9800',
-  fill: '#ffe6bf',
+  stroke: SELECT_EDGE_COLOR,
+  fill: '#4b7da1',
 };
 
 export const SELECT_TOPIC = {
-  stroke: '#ff9800',
-  fill: '#d8f5d0',
+  stroke: SELECT_EDGE_COLOR,
+  fill: '#1f2e41',
 };
 
-export const SELECT_EDGE_COLOR = '#ff9800';
-
 export const HOVER_NODE = {
-  stroke: '#42a5f5',
-  fill: '#d6ecff',
+  stroke: HOVER_EDGE_COLOR,
+  fill: '#3f6d90',
 };
 
 export const HOVER_TOPIC = {
-  stroke: '#42a5f5',
-  fill: '#cbe8ff',
+  stroke: HOVER_EDGE_COLOR,
+  fill: '#162331',
 };
-
-export const HOVER_EDGE_COLOR = '#42a5f5';
 
 export const BASE_FONT_FAMILY = 'Inter, "Segoe UI", Roboto, sans-serif';
 export const BASE_FONT_SIZE = 14;

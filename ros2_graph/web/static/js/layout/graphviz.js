@@ -209,7 +209,7 @@ export function drawLabel(ctx, lines, center, width, { fontSize, lineHeight }) {
   const effectiveLineHeight = lineHeight ?? effectiveFontSize * BASE_LINE_HEIGHT_RATIO;
   ctx.save();
   ctx.font = `${effectiveFontSize}px ${BASE_FONT_FAMILY}`;
-  ctx.fillStyle = '#0d1117';
+  ctx.fillStyle = '#f0f6fc';
   ctx.textBaseline = 'middle';
   const totalHeight = Math.max(lines.length * effectiveLineHeight, effectiveLineHeight);
   const leftX = center.x - width / 2 + 6;

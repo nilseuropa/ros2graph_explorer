@@ -9,6 +9,7 @@ import {
   BASE_LINE_HEIGHT_RATIO,
   BASE_FONT_FAMILY,
   VIEW_MAX_SCALE,
+  BASE_EDGE_COLOR,
 } from '../constants/index.js';
 
 const HIDDEN_NAME_PATTERNS = [/\/rosout\b/i];
@@ -235,7 +236,7 @@ export function buildScene(graph, canvasWidth, canvasHeight) {
       labelLines,
       fontSize,
       lineHeight,
-      strokeColor: nodeInfo.strokeColor || '#1f2328',
+      strokeColor: BASE_EDGE_COLOR,
       fillColor: nodeInfo.fillColor && nodeInfo.fillColor !== 'none' ? nodeInfo.fillColor : undefined,
       shape: nodeInfo.shape || '',
       fontFamily: BASE_FONT_FAMILY,
