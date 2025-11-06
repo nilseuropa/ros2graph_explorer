@@ -38,6 +38,31 @@ header h1 {
   text-transform: uppercase;
 }
 
+.icon-button {
+  background: transparent;
+  border: 1px solid rgba(88, 166, 255, 0.25);
+  color: var(--text);
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  font-size: 1.15rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.icon-button:hover,
+.icon-button:focus-visible {
+  border-color: rgba(88, 166, 255, 0.6);
+  background: rgba(88, 166, 255, 0.18);
+  color: #fff;
+  outline: none;
+}
+
 #meta {
   flex: 1;
   font-size: 0.9rem;
@@ -294,6 +319,63 @@ header h1 {
 .overlay-panel__row--actionable:hover,
 .overlay-panel__row--actionable:focus {
   background: rgba(88, 166, 255, 0.14);
+}
+
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: rgba(13, 17, 23, 0.55);
+  backdrop-filter: blur(6px);
+  z-index: 50;
+}
+
+.settings-overlay.active {
+  display: flex;
+}
+
+.settings-overlay__panel {
+  width: min(520px, calc(100% - 2rem));
+  min-height: 220px;
+  background: rgba(22, 27, 34, 0.97);
+  border: 1px solid rgba(88, 166, 255, 0.35);
+  border-radius: 14px;
+  box-shadow: 0 28px 64px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  padding: 1.5rem;
+}
+
+.settings-overlay__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.settings-overlay__title {
+  margin: 0;
+  font-size: 1.1rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.settings-overlay__close {
+  font-size: 1.35rem;
+  width: 2.25rem;
+  height: 2.25rem;
+}
+
+.settings-overlay__body {
+  flex: 1 1 auto;
+  min-height: 160px;
+  border: 1px dashed rgba(88, 166, 255, 0.25);
+  border-radius: 10px;
+  background: rgba(13, 17, 23, 0.65);
 }
 
 #footer {

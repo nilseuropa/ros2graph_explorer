@@ -11,11 +11,45 @@
     <div id="meta">waiting for data…</div>
     <div id="status">initializing…</div>
     <button id="refreshBtn" type="button">Refresh now</button>
+    <button
+      id="settingsBtn"
+      class="icon-button"
+      type="button"
+      aria-haspopup="dialog"
+      aria-controls="settingsOverlay"
+      aria-expanded="false"
+      title="Open settings"
+    >
+      &#9881;
+    </button>
   </header>
   <div id="canvasContainer">
     <canvas id="graphCanvas"></canvas>
     <canvas id="overlayCanvas"></canvas>
     <div id="contextMenu" class="hidden"></div>
+  </div>
+  <div id="settingsOverlay" class="settings-overlay" aria-hidden="true">
+    <div
+      id="settingsOverlayDialog"
+      class="settings-overlay__panel"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settingsOverlayTitle"
+      tabindex="-1"
+    >
+      <header class="settings-overlay__header">
+        <h2 id="settingsOverlayTitle" class="settings-overlay__title">Settings</h2>
+        <button
+          id="settingsOverlayClose"
+          class="settings-overlay__close icon-button"
+          type="button"
+          aria-label="Close settings"
+        >
+          &times;
+        </button>
+      </header>
+      <div id="settingsOverlayBody" class="settings-overlay__body"></div>
+    </div>
   </div>
   <div id="parameterEditor" class="parameter-editor hidden" aria-hidden="true">
     <div class="parameter-editor__backdrop"></div>

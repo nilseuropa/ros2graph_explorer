@@ -23,6 +23,10 @@ const statusEl = document.getElementById('status');
 const refreshBtn = document.getElementById('refreshBtn');
 const contextMenuEl = document.getElementById('contextMenu');
 const canvasContainer = document.getElementById('canvasContainer');
+const settingsBtn = document.getElementById('settingsBtn');
+const settingsOverlay = document.getElementById('settingsOverlay');
+const settingsOverlayDialog = document.getElementById('settingsOverlayDialog');
+const settingsOverlayClose = document.getElementById('settingsOverlayClose');
 
 const store = new Store();
 const renderer = new GraphRenderer(canvas);
@@ -65,6 +69,39 @@ const interactionController = new InteractionController(canvas, store, viewContr
 });
 
 let refreshTimer = null;
+
+function isSettingsOverlayOpen() {
+  return Boolean(settingsOverlay?.classList.contains('active'));
+}
+
+function openSettingsOverlay() {
+  if (!settingsOverlay) {
+    return;
+  }
+  settingsOverlay.classList.add('active');
+  settingsOverlay.setAttribute('aria-hidden', 'false');
+  if (settingsBtn) {
+    settingsBtn.setAttribute('aria-expanded', 'true');
+  }
+  window.setTimeout(() => {
+    settingsOverlayDialog?.focus();
+  }, 0);
+}
+
+function closeSettingsOverlay() {
+  if (!settingsOverlay) {
+    return;
+  }
+  if (!settingsOverlay.classList.contains('active')) {
+    return;
+  }
+  settingsOverlay.classList.remove('active');
+  settingsOverlay.setAttribute('aria-hidden', 'true');
+  if (settingsBtn) {
+    settingsBtn.setAttribute('aria-expanded', 'false');
+    settingsBtn.focus();
+  }
+}
 
 function resizeCanvas() {
   const header = document.querySelector('header');
@@ -198,6 +235,21 @@ function init() {
     setText(statusEl, 'Canvas elements missing from DOM.');
     return;
   }
+  if (settingsBtn && settingsOverlay) {
+    settingsBtn.addEventListener('click', () => {
+      openSettingsOverlay();
+    });
+    settingsOverlay.addEventListener('click', event => {
+      if (event.target === settingsOverlay) {
+        closeSettingsOverlay();
+      }
+    });
+  }
+  if (settingsOverlayClose) {
+    settingsOverlayClose.addEventListener('click', () => {
+      closeSettingsOverlay();
+    });
+  }
   renderer.setView(store.getView());
   renderer.setSelection(store.getSelection());
   resizeCanvas();
@@ -209,3 +261,9 @@ if (document.readyState === 'loading') {
 } else {
   init();
 }
+
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && isSettingsOverlayOpen()) {
+    closeSettingsOverlay();
+  }
+});
