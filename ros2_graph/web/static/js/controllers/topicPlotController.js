@@ -81,8 +81,14 @@ export class TopicPlotController {
     }
     context.subscription?.();
     context.subscription = null;
-    this.overlay?.hide({ id: context.selectorOverlayId });
-    this.overlay?.hide({ id: context.chartOverlayId });
+    if (context.selectorOverlayId) {
+      this.overlay?.hide({ id: context.selectorOverlayId });
+      context.selectorOverlayId = null;
+    }
+    if (context.chartOverlayId) {
+      this.overlay?.hide({ id: context.chartOverlayId });
+      context.chartOverlayId = null;
+    }
     this.contexts.delete(topicName);
   }
 
