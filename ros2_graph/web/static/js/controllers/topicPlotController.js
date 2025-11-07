@@ -1,5 +1,9 @@
 const MAX_SERIES = 4;
 const POLL_INTERVAL_MS = 750;
+const SAMPLE_POLL_INTERVAL_MS = 400;
+const SAMPLE_FETCH_TIMEOUT_MS = 3000;
+const MAX_SCHEMA_ARRAY_FIELDS = 12;
+const MAX_SAMPLE_ARRAY_FIELDS = 16;
 const WINDOW_MS = 60000;
 const MAX_POINTS = 480;
 const SERIES_COLORS = ['#58a6ff', '#f778ba', '#ffab3d', '#3fb950', '#a371f7', '#fb8d62'];
@@ -29,6 +33,12 @@ export class TopicPlotController {
     };
     this.chartView = null;
     this.boundDraw = () => this.drawChart();
+    this.preview = {
+      streamId: null,
+      topic: null,
+      type: null,
+      fields: [],
+    };
   }
 
   async start(topicName) {
@@ -38,10 +48,24 @@ export class TopicPlotController {
     try {
       const payload = await this.topicApi.getSchema(topicName, { timeout: 5000 });
       const schemas = Array.isArray(payload?.schemas) ? payload.schemas : [];
+      let sampleInfo = null;
+      try {
+        sampleInfo = await this.collectSampleFields(topicName);
+      } catch (error) {
+        const message = error?.message || String(error);
+        this.statusBar?.setStatus(`Sample unavailable: ${message}`);
+      }
+      const sampleType = normalizeTypeName(sampleInfo?.type);
       const entries = schemas
         .map(entry => ({
           type: entry.type,
-          fields: buildPlotFieldList(entry.fields),
+          fields: mergeFieldCandidates(
+            buildPlotFieldList(entry.fields, entry.example),
+            sampleInfo &&
+              (!sampleType || normalizeTypeName(entry.type) === sampleType || schemas.length === 1)
+              ? sampleInfo.fields
+              : [],
+          ),
         }))
         .filter(entry => entry.fields.length > 0);
       if (!entries.length) {
@@ -64,6 +88,7 @@ export class TopicPlotController {
       this.overlay?.hide({ id: this.state.selectionOverlayId });
       this.state.selectionOverlayId = null;
     }
+    await this.stopPreviewStream();
     this.state.topicName = null;
     this.state.schemas = [];
   }
@@ -251,11 +276,64 @@ export class TopicPlotController {
     this.state.selectionOverlayId = overlayId;
   }
 
+  async collectSampleFields(topicName) {
+    await this.stopPreviewStream();
+    this.statusBar?.setStatus(`Waiting for sample from ${topicName}…`);
+    let payload;
+    try {
+      payload = await this.topicApi.echo(topicName, { mode: 'start' });
+    } catch (error) {
+      throw error;
+    }
+    const streamId = payload?.stream_id;
+    if (!streamId) {
+      throw new Error('sample stream unavailable');
+    }
+    this.preview.streamId = streamId;
+    this.preview.topic = topicName;
+    this.preview.type = payload?.type || null;
+    try {
+      const sample = await this.waitForSample(topicName, payload);
+      const fields = buildFieldsFromSample(sample?.message ?? sample?.data);
+      const sampleType = this.preview.type;
+      if (!fields.length) {
+        return null;
+      }
+      return {
+        type: sampleType,
+        fields,
+      };
+    } finally {
+      await this.stopPreviewStream();
+    }
+  }
+
+  async waitForSample(topicName, initialPayload) {
+    let payload = initialPayload;
+    const deadline = Date.now() + SAMPLE_FETCH_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const sample = payload?.sample;
+      if (sample && (sample.message || sample.data)) {
+        return sample;
+      }
+      if (!this.preview.streamId) {
+        break;
+      }
+      await delay(SAMPLE_POLL_INTERVAL_MS);
+      payload = await this.topicApi.echo(topicName, {
+        mode: 'poll',
+        stream: this.preview.streamId,
+      });
+    }
+    return payload?.sample || null;
+  }
+
   async beginPlot(typeName, fields) {
     const topicName = this.state.topicName;
     if (!topicName) {
       return;
     }
+    await this.stopPreviewStream();
     if (this.state.selectionOverlayId) {
       this.overlay?.hide({ id: this.state.selectionOverlayId });
       this.state.selectionOverlayId = null;
@@ -264,7 +342,7 @@ export class TopicPlotController {
     this.state.selectedType = typeName;
     this.state.datasets = fields.map((field, index) => ({
       path: field.path,
-      pathSegments: field.path.split('.').filter(Boolean),
+      pathSegments: pathToSegments(field.path),
       label: field.displayName,
       rawPath: field.path,
       type: field.type,
@@ -312,6 +390,7 @@ export class TopicPlotController {
     this.state.active = false;
     this.state.datasets = [];
     this.state.selectedType = null;
+    await this.stopPreviewStream();
     if (!skipOverlay && this.state.chartOverlayId) {
       this.overlay?.hide({ id: this.state.chartOverlayId });
       this.state.chartOverlayId = null;
@@ -480,6 +559,27 @@ export class TopicPlotController {
     });
   }
 
+  async stopPreviewStream() {
+    if (!this.preview.streamId) {
+      return;
+    }
+    const topicName = this.preview.topic || this.state.topicName;
+    try {
+      if (topicName) {
+        await this.topicApi.echo(topicName, {
+          mode: 'stop',
+          stream: this.preview.streamId,
+        });
+      }
+    } catch {
+      /* ignore */
+    }
+    this.preview.streamId = null;
+    this.preview.topic = null;
+    this.preview.type = null;
+    this.preview.fields = [];
+  }
+
   observeCanvas() {
     if (!this.chartView) {
       return;
@@ -626,41 +726,101 @@ function buildSelectionOverlayId(topicName) {
   return topicName ? `topic-plot-select:${topicName}` : 'topic-plot-select';
 }
 
-function buildPlotFieldList(fields) {
-  const list = [];
+function buildPlotFieldList(fields, example) {
+  const map = new Map();
   const nodes = Array.isArray(fields) ? fields : [];
-  const walk = (target, prefix) => {
+  const walkSchema = (target, prefix) => {
     target.forEach(entry => {
       if (!entry?.name) {
         return;
       }
       const path = prefix ? `${prefix}.${entry.name}` : entry.name;
       if (entry.is_array) {
+        const elementType = entry.element_type || entry.base_type || entry.type || '';
+        if (!isNumericType(elementType)) {
+          return;
+        }
+        const countHint = resolveArrayCount(entry);
+        if (!countHint) {
+          return;
+        }
+        const limit = Math.min(countHint, MAX_SCHEMA_ARRAY_FIELDS);
+        for (let i = 0; i < limit; i += 1) {
+          appendNumericField(map, `${path}[${i}]`, elementType);
+        }
         return;
       }
-      if (entry.is_basic && isNumericType(entry.base_type || entry.type)) {
-        list.push({
-          path,
-          displayName: formatDisplayName(path),
-          type: entry.base_type || entry.type,
-        });
+      const baseType = entry.base_type || entry.type || '';
+      if (isNumericType(baseType)) {
+        appendNumericField(map, path, baseType);
         return;
       }
-      const baseType = entry.base_type || '';
       if (EXCLUDED_TYPES.has(baseType)) {
         return;
       }
       if (entry.children && entry.children.length) {
-        walk(entry.children, path);
+        walkSchema(entry.children, path);
       }
     });
   };
-  walk(nodes, '');
-  return list.sort((a, b) => a.path.localeCompare(b.path));
+  walkSchema(nodes, '');
+  if (example && typeof example === 'object') {
+    traverseSample(example, '', (path, value) => {
+      appendNumericField(map, path, typeof value === 'number' ? 'number' : 'unknown');
+    });
+  }
+  return Array.from(map.values()).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function mergeFieldCandidates(baseFields, sampleFields) {
+  const map = new Map();
+  [...baseFields, ...sampleFields].forEach(field => {
+    if (!field?.path) {
+      return;
+    }
+    if (!map.has(field.path)) {
+      map.set(field.path, field);
+    }
+  });
+  return Array.from(map.values()).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function buildFieldsFromSample(sample) {
+  const map = new Map();
+  traverseSample(sample, '', (path, value) => {
+    appendNumericField(map, path, typeof value === 'number' ? 'number' : 'unknown');
+  });
+  return Array.from(map.values()).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function traverseSample(value, prefix, onValue) {
+  if (value == null) {
+    return;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    if (prefix) {
+      onValue(prefix, value);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    const limit = Math.min(value.length, MAX_SAMPLE_ARRAY_FIELDS);
+    for (let i = 0; i < limit; i += 1) {
+      const path = prefix ? `${prefix}[${i}]` : `[${i}]`;
+      traverseSample(value[i], path, onValue);
+    }
+    return;
+  }
+  if (typeof value === 'object') {
+    Object.entries(value).forEach(([key, child]) => {
+      const path = prefix ? `${prefix}.${key}` : key;
+      traverseSample(child, path, onValue);
+    });
+  }
 }
 
 function isNumericType(typeName = '') {
-  return /^(u?int(8|16|32|64)|float(32|64)?|double)$/.test(String(typeName).toLowerCase());
+  return /^(u?int(8|16|32|64)|float(32|64)?|double|float)$/.test(String(typeName).toLowerCase());
 }
 
 function formatDisplayName(path) {
@@ -680,11 +840,27 @@ function getValueAtPath(obj, segments) {
     if (current == null) {
       return undefined;
     }
-    if (Array.isArray(current)) {
-      const index = Number(segment);
-      return Number.isInteger(index) ? current[index] : undefined;
+    const steps = parseSegmentSteps(segment);
+    let value = current;
+    for (const step of steps) {
+      if (value == null) {
+        return undefined;
+      }
+      if (typeof step === 'string') {
+        if (Array.isArray(value)) {
+          const index = Number(step);
+          value = Number.isInteger(index) ? value[index] : undefined;
+        } else {
+          value = value[step];
+        }
+      } else if (typeof step === 'number') {
+        if (!Array.isArray(value)) {
+          return undefined;
+        }
+        value = value[step];
+      }
     }
-    return current[segment];
+    return value;
   }, obj);
 }
 
@@ -704,4 +880,57 @@ function findOverlayRoot(id) {
   }
   const escaped = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id.replace(/"/g, '\\"');
   return document.querySelector(`[data-overlay-id="${escaped}"]`);
+}
+
+function delay(ms) {
+  return new Promise(resolve => window.setTimeout(resolve, ms));
+}
+
+function normalizeTypeName(typeName) {
+  if (!typeName || typeof typeName !== 'string') {
+    return '';
+  }
+  return typeName.replace(/^\/+/, '').toLowerCase();
+}
+
+function appendNumericField(map, path, type) {
+  if (!path || map.has(path)) {
+    return;
+  }
+  map.set(path, {
+    path,
+    displayName: formatDisplayName(path),
+    type: type || 'number',
+  });
+}
+
+function resolveArrayCount(entry) {
+  if (Number.isFinite(entry.array_size) && entry.array_size > 0) {
+    return entry.array_size;
+  }
+  if (Number.isFinite(entry.max_size) && entry.max_size > 0) {
+    return entry.max_size;
+  }
+  return null;
+}
+
+function pathToSegments(path) {
+  if (!path) {
+    return [];
+  }
+  return path.split('.').filter(Boolean);
+}
+
+function parseSegmentSteps(segment) {
+  const steps = [];
+  const pattern = /([^\[\]]+)|\[(\d+)\]/g;
+  let match;
+  while ((match = pattern.exec(segment || ''))) {
+    if (match[1]) {
+      steps.push(match[1]);
+    } else if (match[2]) {
+      steps.push(Number(match[2]));
+    }
+  }
+  return steps.length ? steps : segment ? [segment] : [];
 }
