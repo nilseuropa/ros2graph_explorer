@@ -1,11 +1,9 @@
 const MAX_SERIES = 4;
-const POLL_INTERVAL_MS = 750;
-const SAMPLE_POLL_INTERVAL_MS = 400;
-const SAMPLE_FETCH_TIMEOUT_MS = 3000;
-const MAX_SCHEMA_ARRAY_FIELDS = 12;
-const MAX_SAMPLE_ARRAY_FIELDS = 16;
 const WINDOW_MS = 60000;
 const MAX_POINTS = 480;
+const SAMPLE_TIMEOUT_MS = 4000;
+const MAX_SCHEMA_ARRAY_FIELDS = 12;
+const MAX_SAMPLE_ARRAY_FIELDS = 16;
 const SERIES_COLORS = ['#58a6ff', '#f778ba', '#ffab3d', '#3fb950', '#a371f7', '#fb8d62'];
 const EXCLUDED_TYPES = new Set([
   'sensor_msgs/msg/PointCloud2',
@@ -16,18 +14,19 @@ const EXCLUDED_TYPES = new Set([
 ]);
 
 export class TopicPlotController {
-  constructor({ topicApi, overlay, statusBar }) {
+  constructor({ topicApi, streamManager, overlay, statusBar }) {
     this.topicApi = topicApi;
+    this.streams = streamManager;
     this.overlay = overlay;
     this.statusBar = statusBar;
-    this.state = new Map();
-    this.boundDraw = () => this.drawChart();
-    this.previewStreams = new Map();
+    this.contexts = new Map(); // topic -> context
   }
 
   async toggle(topicName) {
-    const key = buildOverlayIdForTopic(topicName);
-    if (this.state.has(key)) {
+    if (!topicName) {
+      return;
+    }
+    if (this.contexts.has(topicName)) {
       await this.stop(topicName);
       return;
     }
@@ -35,26 +34,23 @@ export class TopicPlotController {
   }
 
   async start(topicName) {
-    await this.stop(topicName);
-    const context = createPlotContext(topicName);
-    this.state.set(context.id, context);
+    const existing = this.contexts.get(topicName);
+    if (existing) {
+      await this.stop(topicName);
+    }
+    const context = createContext(topicName);
+    this.contexts.set(topicName, context);
     this.statusBar?.setStatus(`Loading schema for ${topicName}…`);
     try {
       const payload = await this.topicApi.getSchema(topicName, { timeout: 5000 });
       const schemas = Array.isArray(payload?.schemas) ? payload.schemas : [];
-      let sampleInfo = null;
-      try {
-        sampleInfo = await this.collectSampleFields(topicName);
-      } catch (error) {
-        const message = error?.message || String(error);
-        this.statusBar?.setStatus(`Sample unavailable: ${message}`);
-      }
+      const sampleInfo = await this.collectSampleFields(context);
       const sampleType = normalizeTypeName(sampleInfo?.type);
       const entries = schemas
         .map(entry => ({
           type: entry.type,
-          fields: mergeFieldCandidates(
-            buildPlotFieldList(entry.fields, entry.example),
+          fields: mergeFields(
+            buildFieldList(entry.fields, entry.example),
             sampleInfo &&
               (!sampleType || normalizeTypeName(entry.type) === sampleType || schemas.length === 1)
               ? sampleInfo.fields
@@ -63,60 +59,59 @@ export class TopicPlotController {
         }))
         .filter(entry => entry.fields.length > 0);
       if (!entries.length) {
-        this.showInfoOverlay(context);
+        this.showInfoOverlay(context, ['No numeric fields available for plotting.']);
+        await this.stop(topicName);
         this.statusBar?.setStatus(`Nothing to plot for ${topicName}`);
-        this.state.delete(context.id);
         return;
       }
       context.schemas = entries;
-      this.showSelectionOverlay(context);
+      this.showSelectorOverlay(context);
       this.statusBar?.setStatus(`Select fields to plot for ${topicName}`);
     } catch (error) {
       const message = error?.message || String(error);
       this.statusBar?.setStatus(`Failed to load schema: ${message}`);
-      this.state.delete(context.id);
+      await this.stop(topicName);
     }
   }
 
   async stop(topicName) {
-    const contextId = topicName ? buildOverlayIdForTopic(topicName) : null;
-    if (contextId && this.state.has(contextId)) {
-      const context = this.state.get(contextId);
-      await this.stopStreaming(context);
-      await this.stopPreviewStream(context);
-      this.overlay?.hide({ id: context.selectionOverlayId });
-      this.overlay?.hide({ id: context.chartOverlayId });
-      this.state.delete(contextId);
+    const context = this.contexts.get(topicName);
+    if (!context) {
       return;
     }
-    const entries = Array.from(this.state.values());
-    await Promise.all(entries.map(entry => this.stop(entry.topicName)));
+    context.subscription?.();
+    context.subscription = null;
+    this.overlay?.hide({ id: context.selectorOverlayId });
+    this.overlay?.hide({ id: context.chartOverlayId });
+    this.contexts.delete(topicName);
   }
 
-  showInfoOverlay(context) {
-    const overlayId = buildSelectionOverlayId(context.topicName);
-    this.overlay?.show(
-      {
-        title: 'Plot',
-        subtitle: context.topicName,
-        sections: [
-          {
-            type: 'text',
-            text: ['No numeric fields available for plotting.'],
-          },
-        ],
-      },
-      { id: overlayId },
-    );
-    this.attachOverlayCloseHandler(overlayId, () => {
-      this.state.delete(context.id);
-    });
-    context.selectionOverlayId = overlayId;
+  async stopAll() {
+    const topics = Array.from(this.contexts.keys());
+    await Promise.all(topics.map(topic => this.stop(topic)));
   }
 
-  showSelectionOverlay(context) {
+  async collectSampleFields(context) {
+    try {
+      const payload = await this.streams.requestSample(context.topicName, null, {
+        timeout: SAMPLE_TIMEOUT_MS,
+      });
+      const sampleData = payload?.sample?.message ?? payload?.sample?.data;
+      if (!sampleData) {
+        return null;
+      }
+      return {
+        type: payload?.type,
+        fields: buildFieldsFromSample(sampleData),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  showSelectorOverlay(context) {
     const { topicName, schemas } = context;
-    const overlayId = buildSelectionOverlayId(topicName);
+    const overlayId = buildSelectorId(topicName);
     const form = document.createElement('form');
     form.className = 'topic-plot-selector';
 
@@ -126,7 +121,7 @@ export class TopicPlotController {
     typeLabel.textContent = 'Message type';
     const typeSelect = document.createElement('select');
     typeSelect.className = 'topic-plot-selector__select';
-    entries.forEach(entry => {
+    schemas.forEach(entry => {
       const option = document.createElement('option');
       option.value = entry.type;
       option.textContent = entry.type;
@@ -134,7 +129,7 @@ export class TopicPlotController {
     });
     typeLabel.appendChild(typeSelect);
     typeControl.appendChild(typeLabel);
-    if (entries.length > 1) {
+    if (schemas.length > 1) {
       form.appendChild(typeControl);
     }
 
@@ -158,13 +153,14 @@ export class TopicPlotController {
     cancelBtn.textContent = 'Cancel';
     cancelBtn.addEventListener('click', () => {
       this.overlay?.hide({ id: overlayId });
+      this.stop(context.topicName).catch(() => {});
     });
     actions.appendChild(submitBtn);
     actions.appendChild(cancelBtn);
     form.appendChild(actions);
 
     const renderFields = typeName => {
-      const entry = entries.find(item => item.type === typeName) || entries[0];
+      const entry = schemas.find(item => item.type === typeName) || schemas[0];
       fieldList.innerHTML = '';
       if (!entry || !entry.fields.length) {
         const empty = document.createElement('p');
@@ -175,14 +171,13 @@ export class TopicPlotController {
         return;
       }
       entry.fields.forEach(field => {
-        const label = document.createElement('label');
-        label.className = 'topic-plot-selector__option';
+        const option = document.createElement('label');
+        option.className = 'topic-plot-selector__option';
         const input = document.createElement('input');
         input.type = 'checkbox';
         input.name = 'plot-field';
         input.value = field.path;
-        label.appendChild(input);
-
+        option.appendChild(input);
         const content = document.createElement('div');
         content.className = 'topic-plot-selector__option-content';
         const title = document.createElement('div');
@@ -193,8 +188,8 @@ export class TopicPlotController {
         hint.textContent = `${field.path} • ${field.type}`;
         content.appendChild(title);
         content.appendChild(hint);
-        label.appendChild(content);
-        fieldList.appendChild(label);
+        option.appendChild(content);
+        fieldList.appendChild(option);
       });
       updateSelectionState();
     };
@@ -205,16 +200,8 @@ export class TopicPlotController {
       countLabel.textContent = `Select up to ${MAX_SERIES} field${MAX_SERIES > 1 ? 's' : ''} (${selectedCount} chosen)`;
       submitBtn.disabled = selectedCount === 0;
       inputs.forEach(input => {
-        if (input.checked) {
-          input.parentElement?.classList.add('topic-plot-selector__option--selected');
-        } else {
-          input.parentElement?.classList.remove('topic-plot-selector__option--selected');
-        }
-        if (!input.checked) {
-          input.disabled = selectedCount >= MAX_SERIES;
-        } else {
-          input.disabled = false;
-        }
+        input.parentElement?.classList.toggle('topic-plot-selector__option--selected', input.checked);
+        input.disabled = !input.checked && selectedCount >= MAX_SERIES;
       });
     };
 
@@ -226,26 +213,24 @@ export class TopicPlotController {
 
     form.addEventListener('submit', event => {
       event.preventDefault();
-      const typeName = typeSelect.value || (entries[0] && entries[0].type);
-      const entry = entries.find(item => item.type === typeName) || entries[0];
+      const typeName = typeSelect.value || schemas[0]?.type;
+      const entry = schemas.find(item => item.type === typeName) || schemas[0];
       if (!entry) {
         return;
       }
-      const inputs = Array.from(fieldList.querySelectorAll('input[type="checkbox"]:checked'));
-      const selected = inputs
+      const selected = Array.from(fieldList.querySelectorAll('input[type="checkbox"]:checked'))
         .map(input => entry.fields.find(field => field.path === input.value))
         .filter(Boolean);
       if (!selected.length) {
         return;
       }
-      this.beginPlot(entry.type, selected);
+      this.beginPlot(context, entry.type, selected).catch(error => {
+        const message = error?.message || String(error);
+        this.statusBar?.setStatus(`Unable to start plot: ${message}`);
+      });
     });
 
-    typeSelect.addEventListener('change', () => {
-      renderFields(typeSelect.value);
-    });
-
-    renderFields(typeSelect.value || entries[0].type);
+    renderFields(typeSelect.value || schemas[0].type);
 
     this.overlay?.show(
       {
@@ -263,81 +248,31 @@ export class TopicPlotController {
       },
       { id: overlayId },
     );
+    context.selectorOverlayId = overlayId;
+    context.ignoreSelectorClose = false;
     this.attachOverlayCloseHandler(overlayId, () => {
-      if (this.state.selectionOverlayId === overlayId) {
-        this.state.selectionOverlayId = null;
+      if (context.ignoreSelectorClose) {
+        context.ignoreSelectorClose = false;
+        return;
+      }
+      if (!context.subscription) {
+        this.stop(context.topicName).catch(() => {});
       }
     });
-    this.state.selectionOverlayId = overlayId;
+    typeSelect.addEventListener('change', () => renderFields(typeSelect.value));
   }
 
-  async collectSampleFields(topicName) {
-    await this.stopPreviewStream();
-    this.statusBar?.setStatus(`Waiting for sample from ${topicName}…`);
-    let payload;
-    try {
-      payload = await this.topicApi.echo(topicName, { mode: 'start' });
-    } catch (error) {
-      throw error;
+  async beginPlot(context, typeName, fields) {
+    if (context.selectorOverlayId) {
+      context.ignoreSelectorClose = true;
+      this.overlay?.hide({ id: context.selectorOverlayId });
     }
-    const streamId = payload?.stream_id;
-    if (!streamId) {
-      throw new Error('sample stream unavailable');
-    }
-    this.preview.streamId = streamId;
-    this.preview.topic = topicName;
-    this.preview.type = payload?.type || null;
-    try {
-      const sample = await this.waitForSample(topicName, payload);
-      const fields = buildFieldsFromSample(sample?.message ?? sample?.data);
-      const sampleType = this.preview.type;
-      if (!fields.length) {
-        return null;
-      }
-      return {
-        type: sampleType,
-        fields,
-      };
-    } finally {
-      await this.stopPreviewStream();
-    }
-  }
-
-  async waitForSample(topicName, initialPayload) {
-    let payload = initialPayload;
-    const deadline = Date.now() + SAMPLE_FETCH_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      const sample = payload?.sample;
-      if (sample && (sample.message || sample.data)) {
-        return sample;
-      }
-      if (!this.preview.streamId) {
-        break;
-      }
-      await delay(SAMPLE_POLL_INTERVAL_MS);
-      payload = await this.topicApi.echo(topicName, {
-        mode: 'poll',
-        stream: this.preview.streamId,
-      });
-    }
-    return payload?.sample || null;
-  }
-
-  async beginPlot(typeName, fields) {
-    const topicName = this.state.topicName;
-    if (!topicName) {
-      return;
-    }
-    await this.stopPreviewStream();
-    if (this.state.selectionOverlayId) {
-      this.overlay?.hide({ id: this.state.selectionOverlayId });
-      this.state.selectionOverlayId = null;
-    }
-    await this.stopStreaming({ skipOverlay: true });
-    this.state.selectedType = typeName;
-    this.state.datasets = fields.map((field, index) => ({
+    context.selectorOverlayId = null;
+    context.subscription?.();
+    context.subscription = null;
+    context.datasets = fields.map((field, index) => ({
       path: field.path,
-      pathSegments: pathToSegments(field.path),
+      segments: parseSegments(field.path),
       label: field.displayName,
       rawPath: field.path,
       type: field.type,
@@ -346,131 +281,46 @@ export class TopicPlotController {
       lastValue: null,
       valueEl: null,
     }));
-
-    try {
-      const payload = await this.topicApi.echo(topicName, { mode: 'start' });
-      const streamId = payload?.stream_id;
-      if (!streamId) {
-        throw new Error('stream unavailable');
-      }
-      this.state.streamId = streamId;
-      this.state.active = true;
-      this.statusBar?.setStatus(`Plotting ${fields.length} field(s) from ${topicName}`);
-      this.showPlotOverlay();
-      this.handlePayload(payload);
-      this.schedulePoll();
-    } catch (error) {
-      await this.stopStreaming({ skipOverlay: true });
-      const message = error?.message || String(error);
-      this.statusBar?.setStatus(`Failed to start plot: ${message}`);
-    }
+    context.selectedType = typeName;
+    this.showPlotOverlay(context);
+    context.subscription = this.streams.subscribe(context.topicName, null, payload => {
+      this.handleStreamPayload(context, payload);
+    });
   }
 
-  async stopStreaming({ skipOverlay = false } = {}) {
-    if (this.state.pollTimer) {
-      window.clearTimeout(this.state.pollTimer);
-      this.state.pollTimer = null;
-    }
-    if (this.state.streamId && this.state.topicName) {
-      try {
-        await this.topicApi.echo(this.state.topicName, {
-          mode: 'stop',
-          stream: this.state.streamId,
-        });
-      } catch {
-        /* ignore stop errors */
-      }
-    }
-    this.state.streamId = null;
-    this.state.active = false;
-    this.state.datasets = [];
-    this.state.selectedType = null;
-    await this.stopPreviewStream();
-    if (!skipOverlay && this.state.chartOverlayId) {
-      this.overlay?.hide({ id: this.state.chartOverlayId });
-      this.state.chartOverlayId = null;
-    } else if (skipOverlay && this.state.chartOverlayId) {
-      this.state.chartOverlayId = null;
-    }
-    this.detachChartView();
-  }
-
-  schedulePoll() {
-    if (!this.state.active || !this.state.streamId) {
+  handleStreamPayload(context, payload) {
+    if (!payload?.sample) {
+      this.statusBar?.setStatus(`Waiting for samples on ${context.topicName}…`);
       return;
     }
-    this.state.pollTimer = window.setTimeout(() => {
-      void this.poll();
-    }, POLL_INTERVAL_MS);
-  }
-
-  async poll() {
-    if (!this.state.active || !this.state.streamId || !this.state.topicName) {
-      return;
-    }
-    try {
-      const payload = await this.topicApi.echo(this.state.topicName, {
-        mode: 'poll',
-        stream: this.state.streamId,
-      });
-      this.handlePayload(payload);
-      this.schedulePoll();
-    } catch (error) {
-      const message = error?.message || String(error);
-      this.statusBar?.setStatus(`Plot stream failed: ${message}`);
-      await this.stopStreaming();
-    }
-  }
-
-  handlePayload(payload) {
-    if (!payload || !this.state.active) {
-      return;
-    }
-    if (payload.stream_id) {
-      this.state.streamId = payload.stream_id;
-    }
-    if (payload.stopped) {
-      void this.stopStreaming();
-      this.statusBar?.setStatus('Plot stopped');
-      return;
-    }
-    const sample = payload.sample;
-    if (!sample) {
-      if (this.chartView?.statusEl) {
-        this.chartView.statusEl.textContent = 'Waiting for samples…';
-      }
-      return;
-    }
-    const message = sample.message ?? sample.data;
+    const message = payload.sample.message ?? payload.sample.data;
     if (!message) {
       return;
     }
-    const timestampSeconds = typeof sample.received_at === 'number' ? sample.received_at : Date.now() / 1000;
-    const timestamp = timestampSeconds * 1000;
-    const updated = this.appendSample(timestamp, message);
+    const timestamp = extractTimestamp(payload.sample);
+    this.statusBar?.setStatus(
+      `Plotting ${context.topicName}: last update ${timestamp.toLocaleTimeString()}`,
+    );
+    const updated = this.appendSample(context, timestamp.getTime(), message);
     if (updated) {
-      this.updateLegend();
-      this.drawChart();
-      if (this.chartView?.statusEl) {
-        const iso = sample.received_iso || new Date(timestamp).toLocaleTimeString();
-        this.chartView.statusEl.textContent = `Last update: ${iso}`;
-      }
+      this.updateLegend(context);
+      this.drawChart(context);
     }
   }
 
-  appendSample(timestamp, message) {
-    if (!this.state.datasets.length) {
+  appendSample(context, timestampMs, message) {
+    if (!context.datasets.length) {
       return false;
     }
     let changed = false;
-    const cutoff = timestamp - WINDOW_MS;
-    this.state.datasets.forEach(dataset => {
-      const value = getValueAtPath(message, dataset.pathSegments);
+    const cutoff = timestampMs - WINDOW_MS;
+    context.datasets.forEach(dataset => {
+      const value = getValueAtPath(message, dataset.segments);
       const numericValue = Number(value);
       if (!Number.isFinite(numericValue)) {
         return;
       }
-      dataset.points.push({ t: timestamp, v: numericValue });
+      dataset.points.push({ t: timestampMs, v: numericValue });
       if (dataset.points.length > MAX_POINTS) {
         dataset.points.splice(0, dataset.points.length - MAX_POINTS);
       }
@@ -483,35 +333,28 @@ export class TopicPlotController {
     return changed;
   }
 
-  showPlotOverlay() {
-    const topicName = this.state.topicName;
-    if (!topicName || !this.state.datasets.length) {
-      return;
-    }
-    const overlayId = buildPlotOverlayId(topicName);
-    const container = document.createElement('div');
-    container.className = 'topic-plot';
-
+  showPlotOverlay(context) {
+    const overlayId = buildChartId(context.topicName);
     const legend = document.createElement('div');
     legend.className = 'topic-plot__legend';
-    container.appendChild(legend);
-
     const canvasWrapper = document.createElement('div');
     canvasWrapper.className = 'topic-plot__canvas-wrapper';
     const canvas = document.createElement('canvas');
     canvas.className = 'topic-plot__canvas';
     canvasWrapper.appendChild(canvas);
-    container.appendChild(canvasWrapper);
-
     const status = document.createElement('div');
     status.className = 'topic-plot__status';
     status.textContent = 'Awaiting samples…';
+    const container = document.createElement('div');
+    container.className = 'topic-plot';
+    container.appendChild(legend);
+    container.appendChild(canvasWrapper);
     container.appendChild(status);
 
     this.overlay?.show(
       {
         title: 'Plot',
-        subtitle: `${topicName} (${this.state.selectedType})`,
+        subtitle: `${context.topicName} (${context.selectedType})`,
         sections: [
           {
             type: 'custom',
@@ -524,118 +367,63 @@ export class TopicPlotController {
       },
       { id: overlayId },
     );
-    this.state.chartOverlayId = overlayId;
+    context.chartOverlayId = overlayId;
+    context.chart = { legendEl: legend, canvas, wrapper: canvasWrapper, statusEl: status };
+    this.renderLegend(context);
     this.attachOverlayCloseHandler(overlayId, () => {
-      void this.stopStreaming({ skipOverlay: true });
+      this.stop(context.topicName).catch(() => {});
     });
-    this.chartView = {
-      canvas,
-      legendEl: legend,
-      statusEl: status,
-      wrapper: canvasWrapper,
-      resizeObserver: null,
-      resizeHandler: null,
-    };
-    this.renderLegend();
-    this.observeCanvas();
-    this.drawChart();
+    this.drawChart(context);
   }
 
-  detachChartView() {
-    if (this.chartView?.resizeObserver) {
-      this.chartView.resizeObserver.disconnect();
-    }
-    if (this.chartView?.resizeHandler) {
-      window.removeEventListener('resize', this.chartView.resizeHandler);
-    }
-    this.chartView = null;
-    this.state.datasets.forEach(dataset => {
-      dataset.valueEl = null;
-    });
-  }
-
-  async stopPreviewStream() {
-    if (!this.preview.streamId) {
+  renderLegend(context) {
+    const chart = context.chart;
+    if (!chart) {
       return;
     }
-    const topicName = this.preview.topic || this.state.topicName;
-    try {
-      if (topicName) {
-        await this.topicApi.echo(topicName, {
-          mode: 'stop',
-          stream: this.preview.streamId,
-        });
-      }
-    } catch {
-      /* ignore */
-    }
-    this.preview.streamId = null;
-    this.preview.topic = null;
-    this.preview.type = null;
-    this.preview.fields = [];
-  }
-
-  observeCanvas() {
-    if (!this.chartView) {
-      return;
-    }
-    if (typeof ResizeObserver !== 'undefined') {
-      this.chartView.resizeObserver = new ResizeObserver(() => this.drawChart());
-      this.chartView.resizeObserver.observe(this.chartView.wrapper);
-    } else {
-      this.chartView.resizeHandler = () => this.drawChart();
-      window.addEventListener('resize', this.chartView.resizeHandler);
-    }
-  }
-
-  renderLegend() {
-    if (!this.chartView) {
-      return;
-    }
-    const legend = this.chartView.legendEl;
-    legend.innerHTML = '';
-    this.state.datasets.forEach(dataset => {
+    chart.legendEl.innerHTML = '';
+    context.datasets.forEach(dataset => {
       const item = document.createElement('div');
       item.className = 'topic-plot__legend-item';
       const swatch = document.createElement('span');
       swatch.className = 'topic-plot__legend-swatch';
       swatch.style.backgroundColor = dataset.color;
+      const text = document.createElement('div');
+      text.className = 'topic-plot__legend-text';
       const label = document.createElement('div');
       label.className = 'topic-plot__legend-label';
       label.textContent = dataset.label;
       const hint = document.createElement('div');
       hint.className = 'topic-plot__legend-hint';
       hint.textContent = dataset.rawPath;
+      text.appendChild(label);
+      text.appendChild(hint);
       const value = document.createElement('div');
       value.className = 'topic-plot__legend-value';
       value.textContent = '—';
       dataset.valueEl = value;
-
-      const text = document.createElement('div');
-      text.className = 'topic-plot__legend-text';
-      text.appendChild(label);
-      text.appendChild(hint);
-
       item.appendChild(swatch);
       item.appendChild(text);
       item.appendChild(value);
-      legend.appendChild(item);
+      chart.legendEl.appendChild(item);
     });
   }
 
-  updateLegend() {
-    this.state.datasets.forEach(dataset => {
+  updateLegend(context) {
+    context.datasets.forEach(dataset => {
       if (dataset.valueEl) {
         dataset.valueEl.textContent = formatValue(dataset.lastValue);
       }
     });
   }
 
-  drawChart() {
-    if (!this.chartView) {
+  drawChart(context) {
+    const chart = context.chart;
+    if (!chart) {
       return;
     }
-    const { canvas, wrapper } = this.chartView;
+    const canvas = chart.canvas;
+    const wrapper = chart.wrapper;
     const width = Math.max(320, wrapper.clientWidth || 0);
     const height = Math.max(220, wrapper.clientHeight || 0);
     if (canvas.width !== width || canvas.height !== height) {
@@ -647,7 +435,7 @@ export class TopicPlotController {
       return;
     }
     ctx.clearRect(0, 0, width, height);
-    const datasets = this.state.datasets.filter(dataset => dataset.points.length);
+    const datasets = context.datasets.filter(ds => ds.points.length);
     if (!datasets.length) {
       ctx.fillStyle = 'rgba(255,255,255,0.5)';
       ctx.font = '14px "Segoe UI", system-ui, sans-serif';
@@ -662,9 +450,7 @@ export class TopicPlotController {
     const valueMax = Math.max(...datasets.map(ds => Math.max(...ds.points.map(pt => pt.v))));
     const timeRange = Math.max(1, timeMax - timeMin);
     const valueRange = Math.max(1e-6, valueMax - valueMin);
-
-    const rootStyles = getComputedStyle(document.body);
-    const textRgb = rootStyles.getPropertyValue('--text-rgb')?.trim() || '255,255,255';
+    const textRgb = getComputedStyle(document.body).getPropertyValue('--text-rgb')?.trim() || '255,255,255';
     const axisColor = `rgba(${textRgb}, 0.35)`;
     ctx.strokeStyle = axisColor;
     ctx.lineWidth = 1;
@@ -678,8 +464,7 @@ export class TopicPlotController {
     datasets.forEach(dataset => {
       ctx.beginPath();
       dataset.points.forEach((point, index) => {
-        const x =
-          padding + ((point.t - timeMin) / timeRange) * Math.max(1, width - padding * 2);
+        const x = padding + ((point.t - timeMin) / timeRange) * Math.max(1, width - padding * 2);
         const y =
           height -
           padding -
@@ -691,21 +476,21 @@ export class TopicPlotController {
         }
       });
       ctx.strokeStyle = dataset.color;
-      ctx.lineWidth = 1.8;
+      ctx.lineWidth = 1.6;
       ctx.stroke();
     });
   }
 
-  attachOverlayCloseHandler(id, handler) {
-    if (!id || !handler) {
+  attachOverlayCloseHandler(overlayId, handler) {
+    if (!overlayId || !handler) {
       return;
     }
-    const root = findOverlayRoot(id);
+    const root = findOverlayRoot(overlayId);
     if (!root) {
       return;
     }
     const listener = event => {
-      if (event?.detail?.id === id) {
+      if (event?.detail?.id === overlayId) {
         handler();
       }
     };
@@ -713,18 +498,24 @@ export class TopicPlotController {
   }
 }
 
-function buildPlotOverlayId(topicName) {
-  return topicName ? `topic-plot:${topicName}` : 'topic-plot';
+function createContext(topicName) {
+  return {
+    topicName,
+    schemas: [],
+    datasets: [],
+    selectedType: null,
+    selectorOverlayId: null,
+    ignoreSelectorClose: false,
+    chartOverlayId: null,
+    chart: null,
+    subscription: null,
+  };
 }
 
-function buildSelectionOverlayId(topicName) {
-  return topicName ? `topic-plot-select:${topicName}` : 'topic-plot-select';
-}
-
-function buildPlotFieldList(fields, example) {
+function buildFieldList(fields, example) {
   const map = new Map();
   const nodes = Array.isArray(fields) ? fields : [];
-  const walkSchema = (target, prefix) => {
+  const walk = (target, prefix) => {
     target.forEach(entry => {
       if (!entry?.name) {
         return;
@@ -741,51 +532,78 @@ function buildPlotFieldList(fields, example) {
         }
         const limit = Math.min(countHint, MAX_SCHEMA_ARRAY_FIELDS);
         for (let i = 0; i < limit; i += 1) {
-          appendNumericField(map, `${path}[${i}]`, elementType);
+          appendField(map, `${path}[${i}]`, elementType);
         }
         return;
       }
       const baseType = entry.base_type || entry.type || '';
       if (isNumericType(baseType)) {
-        appendNumericField(map, path, baseType);
+        appendField(map, path, baseType);
         return;
       }
       if (EXCLUDED_TYPES.has(baseType)) {
         return;
       }
       if (entry.children && entry.children.length) {
-        walkSchema(entry.children, path);
+        walk(entry.children, path);
       }
     });
   };
-  walkSchema(nodes, '');
+  walk(nodes, '');
   if (example && typeof example === 'object') {
     traverseSample(example, '', (path, value) => {
-      appendNumericField(map, path, typeof value === 'number' ? 'number' : 'unknown');
+      appendField(map, path, typeof value === 'number' ? 'number' : 'unknown');
     });
   }
-  return Array.from(map.values()).sort((a, b) => a.path.localeCompare(b.path));
-}
-
-function mergeFieldCandidates(baseFields, sampleFields) {
-  const map = new Map();
-  [...baseFields, ...sampleFields].forEach(field => {
-    if (!field?.path) {
-      return;
-    }
-    if (!map.has(field.path)) {
-      map.set(field.path, field);
-    }
-  });
   return Array.from(map.values()).sort((a, b) => a.path.localeCompare(b.path));
 }
 
 function buildFieldsFromSample(sample) {
   const map = new Map();
   traverseSample(sample, '', (path, value) => {
-    appendNumericField(map, path, typeof value === 'number' ? 'number' : 'unknown');
+    appendField(map, path, typeof value === 'number' ? 'number' : 'unknown');
   });
   return Array.from(map.values()).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function mergeFields(baseFields, sampleFields) {
+  const map = new Map();
+  [...(baseFields || []), ...(sampleFields || [])].forEach(field => {
+    if (!field?.path || map.has(field.path)) {
+      return;
+    }
+    map.set(field.path, field);
+  });
+  return Array.from(map.values()).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function appendField(map, path, type) {
+  if (!path || map.has(path)) {
+    return;
+  }
+  map.set(path, {
+    path,
+    segments: parseSegments(path),
+    displayName: formatDisplayName(path),
+    type: type || 'number',
+  });
+}
+
+function resolveArrayCount(entry) {
+  if (Number.isFinite(entry.array_size) && entry.array_size > 0) {
+    return entry.array_size;
+  }
+  if (Number.isFinite(entry.max_size) && entry.max_size > 0) {
+    return entry.max_size;
+  }
+  return null;
+}
+
+function parseSegments(path) {
+  if (!path) {
+    return [];
+  }
+  return path.split('.').filter(Boolean);
 }
 
 function traverseSample(value, prefix, onValue) {
@@ -814,22 +632,6 @@ function traverseSample(value, prefix, onValue) {
   }
 }
 
-function isNumericType(typeName = '') {
-  return /^(u?int(8|16|32|64)|float(32|64)?|double|float)$/.test(String(typeName).toLowerCase());
-}
-
-function formatDisplayName(path) {
-  return path
-    .split('.')
-    .map(chunk =>
-      chunk
-        .split('_')
-        .map(part => part.charAt(0).toUpperCase() + part.slice(1))
-        .join(' '),
-    )
-    .join(' · ');
-}
-
 function getValueAtPath(obj, segments) {
   return segments.reduce((current, segment) => {
     if (current == null) {
@@ -841,79 +643,14 @@ function getValueAtPath(obj, segments) {
       if (value == null) {
         return undefined;
       }
-      if (typeof step === 'string') {
-        if (Array.isArray(value)) {
-          const index = Number(step);
-          value = Number.isInteger(index) ? value[index] : undefined;
-        } else {
-          value = value[step];
-        }
-      } else if (typeof step === 'number') {
-        if (!Array.isArray(value)) {
-          return undefined;
-        }
+      if (typeof step === 'number') {
+        value = Array.isArray(value) ? value[step] : undefined;
+      } else {
         value = value[step];
       }
     }
     return value;
   }, obj);
-}
-
-function formatValue(value) {
-  if (!Number.isFinite(value)) {
-    return '—';
-  }
-  if (Math.abs(value) >= 1000 || Math.abs(value) < 0.01) {
-    return value.toExponential(2);
-  }
-  return value.toFixed(3);
-}
-
-function findOverlayRoot(id) {
-  if (!id) {
-    return null;
-  }
-  const escaped = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id.replace(/"/g, '\\"');
-  return document.querySelector(`[data-overlay-id="${escaped}"]`);
-}
-
-function delay(ms) {
-  return new Promise(resolve => window.setTimeout(resolve, ms));
-}
-
-function normalizeTypeName(typeName) {
-  if (!typeName || typeof typeName !== 'string') {
-    return '';
-  }
-  return typeName.replace(/^\/+/, '').toLowerCase();
-}
-
-function appendNumericField(map, path, type) {
-  if (!path || map.has(path)) {
-    return;
-  }
-  map.set(path, {
-    path,
-    displayName: formatDisplayName(path),
-    type: type || 'number',
-  });
-}
-
-function resolveArrayCount(entry) {
-  if (Number.isFinite(entry.array_size) && entry.array_size > 0) {
-    return entry.array_size;
-  }
-  if (Number.isFinite(entry.max_size) && entry.max_size > 0) {
-    return entry.max_size;
-  }
-  return null;
-}
-
-function pathToSegments(path) {
-  if (!path) {
-    return [];
-  }
-  return path.split('.').filter(Boolean);
 }
 
 function parseSegmentSteps(segment) {
@@ -928,4 +665,63 @@ function parseSegmentSteps(segment) {
     }
   }
   return steps.length ? steps : segment ? [segment] : [];
+}
+
+function formatDisplayName(path) {
+  return path
+    .split('.')
+    .map(chunk =>
+      chunk
+        .split('_')
+        .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' '),
+    )
+    .join(' · ');
+}
+
+function formatValue(value) {
+  if (!Number.isFinite(value)) {
+    return '—';
+  }
+  if (Math.abs(value) >= 1000 || Math.abs(value) < 0.01) {
+    return value.toExponential(2);
+  }
+  return value.toFixed(3);
+}
+
+function extractTimestamp(sample) {
+  const source = sample?.received_at;
+  const iso = sample?.received_iso;
+  let timestamp = Number.isFinite(source) ? new Date(source * 1000) : iso ? new Date(iso) : new Date();
+  if (Number.isNaN(timestamp.getTime())) {
+    timestamp = new Date();
+  }
+  return timestamp;
+}
+
+function buildSelectorId(topicName) {
+  return `topic-plot-select:${topicName}`;
+}
+
+function buildChartId(topicName) {
+  return `topic-plot:${topicName}`;
+}
+
+function normalizeTypeName(typeName) {
+  if (!typeName || typeof typeName !== 'string') {
+    return '';
+  }
+  return typeName.replace(/^\/+/, '').toLowerCase();
+}
+
+function isNumericType(typeName = '') {
+  return /^(u?int(8|16|32|64)|float(32|64)?|double|float)$/.test(String(typeName).toLowerCase());
+}
+
+function findOverlayRoot(id) {
+  if (!id) {
+    return null;
+  }
+  const escaped = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id.replace(/"/g, '\\"');
+  return document.querySelector(`[data-overlay-id="${escaped}"]`);
 }

@@ -262,12 +262,7 @@ export class ActionController {
       this.statusBar?.setStatus('Echo not available');
       return;
     }
-    if (this.topicEcho.isActive(topicName, peerName)) {
-      await this.topicEcho.stop({ quiet: true });
-      this.statusBar?.setStatus('Echo stopped');
-      return;
-    }
-    await this.topicEcho.start(topicName, peerName);
+    await this.topicEcho.toggle(topicName, peerName);
   }
 
   renderNodeInfo(nodeName, summary, featureSections = []) {

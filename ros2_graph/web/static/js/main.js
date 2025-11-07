@@ -15,6 +15,7 @@ import { NodeToolsApi } from './api/nodeToolsApi.js';
 import { TopicToolsApi } from './api/topicToolsApi.js';
 import { ActionController } from './controllers/actionController.js';
 import { TopicEchoController } from './controllers/topicEchoController.js';
+import { TopicStreamManager } from './controllers/topicStreamManager.js';
 import { TopicPlotController } from './controllers/topicPlotController.js';
 import { ThemeManager } from './ui/themeManager.js';
 
@@ -57,13 +58,15 @@ const parameterEditor = new ParameterEditor();
 const serviceCaller = new ServiceCaller();
 const nodeApi = new NodeToolsApi();
 const topicApi = new TopicToolsApi();
+const streamManager = new TopicStreamManager({ topicApi });
 const topicEchoController = new TopicEchoController({
-  topicApi,
+  streamManager,
   overlay: overlayPanel,
   statusBar,
 });
 const topicPlotController = new TopicPlotController({
   topicApi,
+  streamManager,
   overlay: overlayPanel,
   statusBar,
 });
@@ -474,8 +477,6 @@ async function loadGraph({ manual = false, silent = false } = {}) {
     if (changed) {
       store.resetSelection();
       store.setHover(null);
-      overlayPanel.hide();
-      await topicEchoController.stop({ quiet: true });
       interactionController.clearActiveSelections();
     }
   } catch (err) {
