@@ -27,6 +27,7 @@ export class ActionController {
     parameterEditor,
     serviceCaller,
     topicEcho,
+    topicPlot,
   }) {
     this.store = store;
     this.overlay = overlay;
@@ -36,6 +37,7 @@ export class ActionController {
     this.parameterEditor = parameterEditor;
     this.serviceCaller = serviceCaller;
     this.topicEcho = topicEcho;
+    this.topicPlot = topicPlot;
     this.nodeFeatureCache = new Map();
     if (this.overlay?.setActionHandler) {
       this.overlay.setActionHandler(action => this.handleOverlayAction(action));
@@ -45,9 +47,6 @@ export class ActionController {
   async handleAction(action, target) {
     if (!action || !target) {
       return;
-    }
-    if (action !== 'topic-echo') {
-      await this.topicEcho?.stop({ quiet: true });
     }
     try {
       switch (action) {
@@ -66,8 +65,11 @@ export class ActionController {
         case 'topic-stats':
           await this.showTopicStats(resolveTopicName(target), target.peerName);
           break;
+        case 'topic-plot':
+          await this.topicPlot?.toggle(resolveTopicName(target));
+          break;
         case 'topic-echo':
-          await this.startTopicEcho(resolveTopicName(target), target.peerName);
+          await this.toggleTopicEcho(resolveTopicName(target), target.peerName);
           break;
         default:
           this.statusBar?.setStatus(`Unknown action: ${action}`);
@@ -255,12 +257,12 @@ export class ActionController {
     this.statusBar?.setStatus(`Statistics ready for ${topicName}`);
   }
 
-  startTopicEcho(topicName, peerName) {
-    if (!this.topicEcho) {
+  async toggleTopicEcho(topicName, peerName) {
+    if (!this.topicEcho || !topicName) {
       this.statusBar?.setStatus('Echo not available');
       return;
     }
-    return this.topicEcho.start(topicName, peerName);
+    await this.topicEcho.toggle(topicName, peerName);
   }
 
   renderNodeInfo(nodeName, summary, featureSections = []) {

@@ -15,6 +15,8 @@ import { NodeToolsApi } from './api/nodeToolsApi.js';
 import { TopicToolsApi } from './api/topicToolsApi.js';
 import { ActionController } from './controllers/actionController.js';
 import { TopicEchoController } from './controllers/topicEchoController.js';
+import { TopicStreamManager } from './controllers/topicStreamManager.js';
+import { TopicPlotController } from './controllers/topicPlotController.js';
 import { ThemeManager } from './ui/themeManager.js';
 
 const canvas = document.getElementById('graphCanvas');
@@ -56,8 +58,15 @@ const parameterEditor = new ParameterEditor();
 const serviceCaller = new ServiceCaller();
 const nodeApi = new NodeToolsApi();
 const topicApi = new TopicToolsApi();
+const streamManager = new TopicStreamManager({ topicApi });
 const topicEchoController = new TopicEchoController({
+  streamManager,
+  overlay: overlayPanel,
+  statusBar,
+});
+const topicPlotController = new TopicPlotController({
   topicApi,
+  streamManager,
   overlay: overlayPanel,
   statusBar,
 });
@@ -70,6 +79,7 @@ const actionController = new ActionController({
   parameterEditor,
   serviceCaller,
   topicEcho: topicEchoController,
+  topicPlot: topicPlotController,
 });
 const contextMenu = new ContextMenu(contextMenuEl, {
   getItems: target => getContextMenuItems(target),
@@ -415,6 +425,7 @@ function getContextMenuItems(target) {
     return [
       { action: 'topic-info', label: 'Info' },
       { action: 'topic-stats', label: 'Statistics' },
+      { action: 'topic-plot', label: 'Plot' },
       { action: 'topic-echo', label: 'Echo' },
     ];
   }
@@ -466,8 +477,6 @@ async function loadGraph({ manual = false, silent = false } = {}) {
     if (changed) {
       store.resetSelection();
       store.setHover(null);
-      overlayPanel.hide();
-      await topicEchoController.stop({ quiet: true });
       interactionController.clearActiveSelections();
     }
   } catch (err) {

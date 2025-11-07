@@ -1,126 +1,80 @@
 import { formatHz, formatBytesPerSecond } from '../utils/format.js';
 
-const POLL_INTERVAL_MS = 1000;
-const buildEchoOverlayId = (topicName, peerName) => ['topic-echo', topicName, peerName].filter(Boolean).join(':');
+const buildEchoKey = (topicName, peerName) => [topicName, peerName || ''].join('@');
+const buildEchoOverlayId = (topicName, peerName) =>
+  ['topic-echo', topicName, peerName].filter(Boolean).join(':');
 
 export class TopicEchoController {
-  constructor({ topicApi, overlay, statusBar }) {
-    this.topicApi = topicApi;
+  constructor({ streamManager, overlay, statusBar }) {
+    this.streams = streamManager;
     this.overlay = overlay;
     this.statusBar = statusBar;
-    this.state = {
-      active: false,
-      topicName: null,
-      peerName: null,
-      streamId: null,
-      timer: null,
-      overlayId: null,
-    };
+    this.overlays = new Map(); // key -> context
   }
 
-  async start(topicName, peerName) {
+  async toggle(topicName, peerName) {
     if (!topicName) {
       return;
     }
-    await this.stop({ quiet: true });
-    this.statusBar?.setStatus(`Starting echo for ${topicName}…`);
-    this.state = {
-      active: true,
+    const key = buildEchoKey(topicName, peerName);
+    if (this.overlays.has(key)) {
+      this.closeOverlay(key);
+      return;
+    }
+    this.openOverlay(topicName, peerName);
+  }
+
+  openOverlay(topicName, peerName) {
+    const key = buildEchoKey(topicName, peerName);
+    if (this.overlays.has(key)) {
+      this.closeOverlay(key);
+    }
+    const overlayId = buildEchoOverlayId(topicName, peerName);
+    const context = {
+      key,
       topicName,
-      peerName: peerName || null,
-      streamId: null,
-      timer: null,
-      overlayId: buildEchoOverlayId(topicName, peerName),
+      peerName,
+      overlayId,
+      unsubscribe: null,
+      closeAttached: false,
     };
-    try {
-      const payload = await this.topicApi.echo(topicName, {
-        mode: 'start',
-        peer: peerName,
-      });
-      this.handlePayload(payload);
-      this.schedulePoll();
-    } catch (error) {
-      this.statusBar?.setStatus(`Failed to start echo: ${error?.message || error}`);
-      await this.stop({ quiet: true });
-    }
+    const unsubscribe = this.streams.subscribe(topicName, peerName, payload => {
+      this.handlePayload(context, payload);
+    });
+    context.unsubscribe = unsubscribe;
+    this.overlays.set(key, context);
+    this.statusBar?.setStatus(`Echoing ${topicName}…`);
   }
 
-  async stop({ quiet = false } = {}) {
-    if (!this.state.active) {
+  closeOverlay(key) {
+    const context = this.overlays.get(key);
+    if (!context) {
       return;
     }
-    if (this.state.timer) {
-      window.clearTimeout(this.state.timer);
-      this.state.timer = null;
-    }
-    if (this.state.streamId) {
-      try {
-        await this.topicApi.echo(this.state.topicName, {
-          mode: 'stop',
-          stream: this.state.streamId,
-          peer: this.state.peerName,
-        });
-      } catch (error) {
-        /* ignore stop errors */
-      }
-    }
-    const overlayId = this.state.overlayId;
-    this.state = {
-      active: false,
-      topicName: null,
-      peerName: null,
-      streamId: null,
-      timer: null,
-      overlayId: null,
-    };
-    this.overlay?.hide({ id: overlayId });
+    context.unsubscribe?.();
+    this.overlay?.hide({ id: context.overlayId });
+    this.overlays.delete(key);
+    this.statusBar?.setStatus(`Echo stopped on ${context.topicName}`);
+  }
+
+  async stopAll({ quiet = false } = {}) {
+    const keys = Array.from(this.overlays.keys());
+    keys.forEach(key => this.closeOverlay(key));
     if (!quiet) {
-      this.statusBar?.setStatus('Echo stopped');
+      this.statusBar?.setStatus('All echo streams stopped');
     }
   }
 
-  schedulePoll() {
-    if (!this.state.active || !this.state.streamId) {
+  handlePayload(context, payload) {
+    if (!payload) {
       return;
     }
-    this.state.timer = window.setTimeout(() => {
-      this.poll().catch(error => {
-        const message = error?.message || String(error);
-        this.statusBar?.setStatus(`Echo failed: ${message}`);
-        this.stop({ quiet: true });
-      });
-    }, POLL_INTERVAL_MS);
-  }
-
-  async poll() {
-    if (!this.state.active || !this.state.streamId) {
+    if (payload.error) {
+      this.statusBar?.setStatus(`Echo error on ${context.topicName}: ${payload.error}`);
+      this.closeOverlay(context.key);
       return;
     }
-    try {
-      const payload = await this.topicApi.echo(this.state.topicName, {
-        mode: 'poll',
-        stream: this.state.streamId,
-        peer: this.state.peerName,
-      });
-      this.handlePayload(payload);
-      this.schedulePoll();
-    } catch (error) {
-      throw error;
-    }
-  }
-
-  handlePayload(payload) {
-    if (!payload || !this.state.active) {
-      return;
-    }
-    if (payload.stopped) {
-      this.stop();
-      return;
-    }
-    if (payload.stream_id) {
-      this.state.streamId = payload.stream_id;
-    }
-    const topicName = payload.topic ?? this.state.topicName;
+    const topicName = payload.topic ?? context.topicName;
     const subtitleParts = [];
     if (payload.type) {
       subtitleParts.push(payload.type);
@@ -133,25 +87,34 @@ export class TopicEchoController {
         subtitle: subtitleParts.join(' • '),
         sections: buildEchoSections(payload),
       },
-      { id: this.state.overlayId || buildEchoOverlayId(topicName, this.state.peerName) },
+      { id: context.overlayId },
     );
+    this.attachOverlayCloseHandler(context);
     if (payload.sample) {
-      const timestampSource = payload.sample.received_at;
-      const iso = payload.sample.received_iso;
-      let timestamp = Number.isFinite(timestampSource)
-        ? new Date(timestampSource * 1000)
-        : iso
-        ? new Date(iso)
-        : new Date();
-      if (Number.isNaN(timestamp.getTime())) {
-        timestamp = new Date();
-      }
+      const timestamp = extractTimestamp(payload.sample);
       this.statusBar?.setStatus(
         `Echoing ${topicName}: ${messages} messages (last update ${timestamp.toLocaleTimeString()})`,
       );
     } else {
       this.statusBar?.setStatus(`Listening on ${topicName}…`);
     }
+  }
+
+  attachOverlayCloseHandler(context) {
+    if (!context.overlayId || context.closeAttached) {
+      return;
+    }
+    const root = findOverlayRoot(context.overlayId);
+    if (!root) {
+      return;
+    }
+    context.closeAttached = true;
+    const listener = event => {
+      if (event?.detail?.id === context.overlayId) {
+        this.closeOverlay(context.key);
+      }
+    };
+    root.addEventListener('overlaypanel:close', listener, { once: true });
   }
 }
 
@@ -186,4 +149,26 @@ function buildEchoSections(payload) {
     });
   }
   return sections;
+}
+
+function extractTimestamp(sample) {
+  const timestampSource = sample.received_at;
+  const iso = sample.received_iso;
+  let timestamp = Number.isFinite(timestampSource)
+    ? new Date(timestampSource * 1000)
+    : iso
+    ? new Date(iso)
+    : new Date();
+  if (Number.isNaN(timestamp.getTime())) {
+    timestamp = new Date();
+  }
+  return timestamp;
+}
+
+function findOverlayRoot(id) {
+  if (!id) {
+    return null;
+  }
+  const escaped = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id.replace(/"/g, '\\"');
+  return document.querySelector(`[data-overlay-id="${escaped}"]`);
 }
