@@ -468,6 +468,47 @@ header h1 {
   padding: 1rem;
 }
 
+.settings-tabs {
+  display: flex;
+  gap: 0.5rem;
+  border-bottom: 1px solid rgba(var(--accent-secondary-rgb), 0.2);
+}
+
+.settings-tabs__tab {
+  background: rgba(var(--accent-secondary-rgb), 0.08);
+  border: 1px solid transparent;
+  border-bottom: none;
+  color: var(--text);
+  padding: 0.5rem 0.9rem;
+  border-radius: 8px 8px 0 0;
+  font-weight: 600;
+  cursor: pointer;
+  opacity: 0.75;
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+.settings-tabs__tab--active {
+  background: rgba(var(--accent-secondary-rgb), 0.2);
+  opacity: 1;
+}
+
+.settings-tabs__tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(var(--accent-secondary-rgb), 0.35);
+}
+
+.settings-tabs__panels {
+  padding-top: 1rem;
+}
+
+.settings-tabs__panel {
+  display: block;
+}
+
+.settings-tabs__panel[hidden] {
+  display: none !important;
+}
+
 .settings-form__fieldset {
   margin: 0;
   padding: 0;
@@ -532,6 +573,56 @@ header h1 {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: rgba(var(--text-rgb), 0.7);
+}
+
+.settings-form__hint {
+  margin: 0;
+  font-size: 0.8rem;
+  color: rgba(var(--text-rgb), 0.65);
+}
+
+.settings-form__split {
+  display: grid;
+  gap: 1rem;
+}
+
+@media (min-width: 520px) {
+  .settings-form__split {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.settings-form__toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  border: 1px solid rgba(var(--accent-secondary-rgb), 0.35);
+  border-radius: 10px;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.settings-form__toggle:hover,
+.settings-form__toggle:focus-within {
+  border-color: rgba(var(--accent-secondary-rgb), 0.65);
+  background: rgba(var(--accent-secondary-rgb), 0.08);
+}
+
+.settings-form__toggle input[type='checkbox'] {
+  width: 1.25rem;
+  height: 1.25rem;
+  margin: 0.2rem 0 0;
+  accent-color: var(--accent-secondary);
+}
+
+.settings-form__toggle-content {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.settings-form__toggle-content span {
+  font-weight: 600;
 }
 
 .settings-form__colors {
