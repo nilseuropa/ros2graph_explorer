@@ -1,3 +1,5 @@
+import { DEFAULT_GENERAL_SETTINGS } from '../state/generalSettingsManager.js';
+
 const MAX_SERIES = 4;
 const WINDOW_MS = 60000;
 const MAX_POINTS = 480;
@@ -14,11 +16,20 @@ const EXCLUDED_TYPES = new Set([
 ]);
 
 export class TopicPlotController {
-  constructor({ topicApi, streamManager, overlay, statusBar }) {
+  constructor({ topicApi, streamManager, overlay, statusBar, generalSettings }) {
     this.topicApi = topicApi;
     this.streams = streamManager;
     this.overlay = overlay;
     this.statusBar = statusBar;
+    this.generalSettings = generalSettings ?? null;
+    this.generalSettingsState = generalSettings?.getState?.() ?? { ...DEFAULT_GENERAL_SETTINGS };
+    this.settingsUnsubscribe =
+      typeof generalSettings?.subscribe === 'function'
+        ? generalSettings.subscribe(state => {
+            this.generalSettingsState = state;
+            this.applyGeneralSettings();
+          })
+        : null;
     this.contexts = new Map(); // topic -> context
   }
 
@@ -81,6 +92,13 @@ export class TopicPlotController {
     }
     context.subscription?.();
     context.subscription = null;
+    if (context.refreshTimer) {
+      window.clearTimeout(context.refreshTimer);
+      context.refreshTimer = null;
+    }
+    context.pendingPayload = null;
+    context.latestPayload = null;
+    context.lastSampleStamp = null;
     if (context.selectorOverlayId) {
       this.overlay?.hide({ id: context.selectorOverlayId });
       context.selectorOverlayId = null;
@@ -287,6 +305,14 @@ export class TopicPlotController {
       lastValue: null,
       valueEl: null,
     }));
+    context.pendingPayload = null;
+    context.latestPayload = null;
+    context.lastRenderAt = 0;
+    context.lastSampleStamp = null;
+    if (context.refreshTimer) {
+      window.clearTimeout(context.refreshTimer);
+      context.refreshTimer = null;
+    }
     context.selectedType = typeName;
     this.showPlotOverlay(context);
     context.subscription = this.streams.subscribe(context.topicName, null, payload => {
@@ -295,6 +321,33 @@ export class TopicPlotController {
   }
 
   handleStreamPayload(context, payload) {
+    if (!context) {
+      return;
+    }
+    const nextPayload = payload ?? null;
+    context.pendingPayload = nextPayload;
+    if (nextPayload) {
+      context.latestPayload = nextPayload;
+    }
+    if (this.shouldAutoRefresh()) {
+      this.flushPendingPayload(context);
+      return;
+    }
+    this.schedulePlotRefresh(context);
+  }
+
+  flushPendingPayload(context) {
+    if (!context) {
+      return;
+    }
+    const payload = context.pendingPayload ?? context.latestPayload;
+    context.pendingPayload = null;
+    if (payload) {
+      this.renderStreamPayload(context, payload);
+    }
+  }
+
+  renderStreamPayload(context, payload) {
     if (!payload?.sample) {
       this.statusBar?.setStatus(`Waiting for samples on ${context.topicName}…`);
       return;
@@ -303,15 +356,76 @@ export class TopicPlotController {
     if (!message) {
       return;
     }
+    const sampleStamp = buildSampleStamp(payload.sample);
+    if (sampleStamp && sampleStamp === context.lastSampleStamp) {
+      return;
+    }
     const timestamp = extractTimestamp(payload.sample);
     this.statusBar?.setStatus(
       `Plotting ${context.topicName}: last update ${timestamp.toLocaleTimeString()}`,
     );
     const updated = this.appendSample(context, timestamp.getTime(), message);
+    context.lastSampleStamp = sampleStamp ?? context.lastSampleStamp;
     if (updated) {
       this.updateLegend(context);
       this.drawChart(context);
     }
+    context.lastRenderAt = Date.now();
+  }
+
+  schedulePlotRefresh(context) {
+    if (!context?.pendingPayload) {
+      return;
+    }
+    const interval = this.getPlotRefreshInterval();
+    const elapsed = Date.now() - (context.lastRenderAt ?? 0);
+    if (elapsed >= interval) {
+      this.flushPendingPayload(context);
+      return;
+    }
+    if (context.refreshTimer) {
+      return;
+    }
+    const delay = Math.max(0, interval - elapsed);
+    context.refreshTimer = window.setTimeout(() => {
+      context.refreshTimer = null;
+      this.flushPendingPayload(context);
+    }, delay);
+  }
+
+  shouldAutoRefresh() {
+    return Boolean(this.generalSettingsState?.streamAutoRefresh ?? true);
+  }
+
+  getPlotRefreshInterval() {
+    const value =
+      this.generalSettingsState?.plotRefreshIntervalMs ?? DEFAULT_GENERAL_SETTINGS.plotRefreshIntervalMs;
+    const numeric = Number(value);
+    const clamped = Number.isFinite(numeric) ? numeric : DEFAULT_GENERAL_SETTINGS.plotRefreshIntervalMs;
+    return Math.max(250, clamped);
+  }
+
+  applyGeneralSettings() {
+    if (!this.contexts.size) {
+      return;
+    }
+    this.contexts.forEach(context => {
+      if (context.refreshTimer) {
+        window.clearTimeout(context.refreshTimer);
+        context.refreshTimer = null;
+      }
+    });
+    if (this.shouldAutoRefresh()) {
+      this.contexts.forEach(context => {
+        this.flushPendingPayload(context);
+      });
+      return;
+    }
+    this.contexts.forEach(context => {
+      if (context.pendingPayload) {
+        this.schedulePlotRefresh(context);
+      }
+    });
   }
 
   appendSample(context, timestampMs, message) {
@@ -515,6 +629,11 @@ function createContext(topicName) {
     chartOverlayId: null,
     chart: null,
     subscription: null,
+    pendingPayload: null,
+    latestPayload: null,
+    lastRenderAt: 0,
+    refreshTimer: null,
+    lastSampleStamp: null,
   };
 }
 
@@ -730,4 +849,33 @@ function findOverlayRoot(id) {
   }
   const escaped = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id.replace(/"/g, '\\"');
   return document.querySelector(`[data-overlay-id="${escaped}"]`);
+}
+
+function buildSampleStamp(sample) {
+  if (!sample) {
+    return null;
+  }
+  if (Number.isFinite(sample.received_at)) {
+    return `at:${sample.received_at}`;
+  }
+  if (sample.received_iso) {
+    return `iso:${sample.received_iso}`;
+  }
+  if (typeof sample.sequence === 'number') {
+    return `seq:${sample.sequence}`;
+  }
+  if (sample.header?.stamp) {
+    const { sec, nanosec } = sample.header.stamp;
+    if (Number.isFinite(sec) || Number.isFinite(nanosec)) {
+      return `hdr:${sec ?? 0}:${nanosec ?? 0}`;
+    }
+  }
+  if (sample.hash) {
+    return `hash:${sample.hash}`;
+  }
+  try {
+    return `json:${JSON.stringify(sample).slice(0, 120)}`;
+  } catch {
+    return 'sample';
+  }
 }

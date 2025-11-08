@@ -6,6 +6,7 @@ import { InteractionController } from './interaction/interactionController.js';
 import { StatusBar } from './ui/statusBar.js';
 import { Store } from './state/store.js';
 import { GRAPH_REFRESH_INTERVAL_MS } from './constants/index.js';
+import { GeneralSettingsManager, DEFAULT_GENERAL_SETTINGS } from './state/generalSettingsManager.js';
 import { setText } from './utils/dom.js';
 import { ContextMenu } from './ui/contextMenu.js';
 import { OverlayPanel } from './ui/overlayPanel.js';
@@ -38,10 +39,24 @@ const {
   schemeSelect: customThemeScheme,
   resetButton: customThemeResetBtn,
   colorInputs: customThemeInputs,
+  generalInputs,
+  tabs: settingsTabs,
 } = ensureSettingsForm(settingsOverlayBody);
 
 const themeManager = new ThemeManager();
 themeManager.init();
+
+const generalSettings = new GeneralSettingsManager();
+generalSettings.init();
+let generalSettingsState = generalSettings.getState() ?? { ...DEFAULT_GENERAL_SETTINGS };
+generalSettings.subscribe(state => {
+  const previous = generalSettingsState;
+  generalSettingsState = state;
+  updateSettingsForm({ generalState: generalSettingsState });
+  if (state.graphRefreshIntervalMs !== previous.graphRefreshIntervalMs) {
+    scheduleNextRefresh();
+  }
+});
 
 const store = new Store();
 const renderer = new GraphRenderer(canvas);
@@ -63,12 +78,14 @@ const topicEchoController = new TopicEchoController({
   streamManager,
   overlay: overlayPanel,
   statusBar,
+  generalSettings,
 });
 const topicPlotController = new TopicPlotController({
   topicApi,
   streamManager,
   overlay: overlayPanel,
   statusBar,
+  generalSettings,
 });
 const actionController = new ActionController({
   store,
@@ -92,7 +109,7 @@ const interactionController = new InteractionController(canvas, store, viewContr
 });
 
 function handleThemeChange(state) {
-  updateSettingsForm(state);
+  updateSettingsForm({ themeState: state });
   if (state?.graphPalette) {
     renderer.setPalette(state.graphPalette);
   }
@@ -111,129 +128,200 @@ function ensureSettingsForm(container) {
       schemeSelect: null,
       resetButton: null,
       colorInputs: {},
+      generalInputs: {},
+      tabs: null,
     };
   }
-  if (!container.querySelector('#settingsForm')) {
-    container.innerHTML = `
-      <form id="settingsForm" class="settings-form" autocomplete="off">
-        <fieldset class="settings-form__fieldset">
-          <legend>Theme</legend>
-          <label class="settings-form__option">
-            <input type="radio" name="settingsTheme" value="dark">
-            <span>Dark</span>
-          </label>
-          <label class="settings-form__option">
-            <input type="radio" name="settingsTheme" value="light">
-            <span>Light</span>
-          </label>
-          <label class="settings-form__option">
-            <input type="radio" name="settingsTheme" value="custom">
-            <span>Custom</span>
-          </label>
-        </fieldset>
-        <section id="customThemeSection" class="settings-form__custom" hidden>
-          <p class="settings-form__note">
-            Adjust the palette to build a custom theme. Changes apply instantly while custom mode is active.
-          </p>
-          <div class="settings-form__field">
-            <label for="customThemeScheme">Base variant</label>
-            <select id="customThemeScheme">
-              <option value="dark">Dark</option>
-              <option value="light">Light</option>
-            </select>
-          </div>
+  container.innerHTML = `
+    <form id="settingsForm" class="settings-form" autocomplete="off">
+      <div class="settings-tabs" role="tablist" aria-label="Settings categories">
+        <button
+          type="button"
+          class="settings-tabs__tab"
+          id="settingsTabGeneral"
+          role="tab"
+          data-settings-tab="general"
+          aria-controls="settingsPanelGeneral"
+          aria-selected="true"
+          tabindex="0"
+        >
+          General
+        </button>
+        <button
+          type="button"
+          class="settings-tabs__tab"
+          id="settingsTabTheme"
+          role="tab"
+          data-settings-tab="theme"
+          aria-controls="settingsPanelTheme"
+          aria-selected="false"
+          tabindex="-1"
+        >
+          Theme
+        </button>
+      </div>
+      <div class="settings-tabs__panels">
+        <section
+          class="settings-tabs__panel"
+          id="settingsPanelGeneral"
+          role="tabpanel"
+          data-settings-panel="general"
+          aria-labelledby="settingsTabGeneral"
+        >
           <div class="settings-form__group">
-            <h3 class="settings-form__group-title">Interface</h3>
-            <div class="settings-form__colors">
-              <label class="settings-form__color" for="customBg">
-                <span>Background</span>
-                <input type="color" id="customBg" name="customBg" value="#0d1117">
-              </label>
-              <label class="settings-form__color" for="customPanel">
-                <span>Panel</span>
-                <input type="color" id="customPanel" name="customPanel" value="#161b22">
-              </label>
-              <label class="settings-form__color" for="customText">
-                <span>Text</span>
-                <input type="color" id="customText" name="customText" value="#e6edf3">
-              </label>
-              <label class="settings-form__color" for="customAccent">
-                <span>Accent</span>
-                <input type="color" id="customAccent" name="customAccent" value="#3fb950">
-              </label>
-              <label class="settings-form__color" for="customAccentSecondary">
-                <span>Accent Secondary</span>
-                <input type="color" id="customAccentSecondary" name="customAccentSecondary" value="#58a6ff">
-              </label>
+            <div class="settings-form__field">
+              <label for="generalGraphRefresh">Graph refresh rate (ms)</label>
+              <input type="number" id="generalGraphRefresh" min="500" max="60000" step="100">
+              <p class="settings-form__hint">Controls how often the graph data is fetched automatically.</p>
             </div>
-          </div>
-          <div class="settings-form__group">
-            <h3 class="settings-form__group-title">Graph Edges</h3>
-            <div class="settings-form__colors">
-              <label class="settings-form__color" for="customGraphEdge">
-                <span>Base</span>
-                <input type="color" id="customGraphEdge" name="customGraphEdge" value="#3a4b5e">
-              </label>
-              <label class="settings-form__color" for="customGraphEdgeHover">
-                <span>Hover</span>
-                <input type="color" id="customGraphEdgeHover" name="customGraphEdgeHover" value="#5cb2ff">
-              </label>
-              <label class="settings-form__color" for="customGraphEdgeSelect">
-                <span>Select</span>
-                <input type="color" id="customGraphEdgeSelect" name="customGraphEdgeSelect" value="#ffab3d">
-              </label>
+            <label class="settings-form__toggle">
+              <input type="checkbox" id="generalStreamAuto">
+              <div class="settings-form__toggle-content">
+                <span>Refresh echoes & plots on every update</span>
+                <p class="settings-form__hint">Disable to refresh overlays at a fixed rate.</p>
+              </div>
+            </label>
+            <div class="settings-form__split">
+              <div class="settings-form__field">
+                <label for="generalEchoRefresh">Echo refresh interval (ms)</label>
+                <input type="number" id="generalEchoRefresh" min="250" max="10000" step="50">
+                <p class="settings-form__hint">Applied when automatic refresh is disabled.</p>
+              </div>
+              <div class="settings-form__field">
+                <label for="generalPlotRefresh">Plot refresh interval (ms)</label>
+                <input type="number" id="generalPlotRefresh" min="250" max="10000" step="50">
+                <p class="settings-form__hint">Applied when automatic refresh is disabled.</p>
+              </div>
             </div>
-          </div>
-          <div class="settings-form__group">
-            <h3 class="settings-form__group-title">Graph Nodes</h3>
-            <div class="settings-form__colors">
-              <label class="settings-form__color" for="customGraphNodeFill">
-                <span>Base Fill</span>
-                <input type="color" id="customGraphNodeFill" name="customGraphNodeFill" value="#2b4a65">
-              </label>
-              <label class="settings-form__color" for="customGraphNodeHover">
-                <span>Hover Fill</span>
-                <input type="color" id="customGraphNodeHover" name="customGraphNodeHover" value="#3f6d90">
-              </label>
-              <label class="settings-form__color" for="customGraphNodeSelect">
-                <span>Select Fill</span>
-                <input type="color" id="customGraphNodeSelect" name="customGraphNodeSelect" value="#4b7da1">
-              </label>
-            </div>
-          </div>
-          <div class="settings-form__group">
-            <h3 class="settings-form__group-title">Graph Topics</h3>
-            <div class="settings-form__colors">
-              <label class="settings-form__color" for="customGraphTopicFill">
-                <span>Base Fill</span>
-                <input type="color" id="customGraphTopicFill" name="customGraphTopicFill" value="#14202c">
-              </label>
-              <label class="settings-form__color" for="customGraphTopicHover">
-                <span>Hover Fill</span>
-                <input type="color" id="customGraphTopicHover" name="customGraphTopicHover" value="#162331">
-              </label>
-              <label class="settings-form__color" for="customGraphTopicSelect">
-                <span>Select Fill</span>
-                <input type="color" id="customGraphTopicSelect" name="customGraphTopicSelect" value="#1f2e41">
-              </label>
-            </div>
-          </div>
-          <div class="settings-form__group">
-            <h3 class="settings-form__group-title">Graph Labels</h3>
-            <div class="settings-form__colors">
-              <label class="settings-form__color" for="customGraphLabelText">
-                <span>Text</span>
-                <input type="color" id="customGraphLabelText" name="customGraphLabelText" value="#f0f6fc">
-              </label>
-            </div>
-          </div>
-          <div class="settings-form__actions">
-            <button type="button" id="customThemeReset" class="secondary">Reset custom theme</button>
           </div>
         </section>
-      </form>
-    `;
-  }
+        <section
+          class="settings-tabs__panel"
+          id="settingsPanelTheme"
+          role="tabpanel"
+          data-settings-panel="theme"
+          aria-labelledby="settingsTabTheme"
+          hidden
+        >
+          <fieldset class="settings-form__fieldset">
+            <legend>Theme</legend>
+            <label class="settings-form__option">
+              <input type="radio" name="settingsTheme" value="dark">
+              <span>Dark</span>
+            </label>
+            <label class="settings-form__option">
+              <input type="radio" name="settingsTheme" value="light">
+              <span>Light</span>
+            </label>
+            <label class="settings-form__option">
+              <input type="radio" name="settingsTheme" value="custom">
+              <span>Custom</span>
+            </label>
+          </fieldset>
+          <section id="customThemeSection" class="settings-form__custom" hidden>
+            <p class="settings-form__note">
+              Adjust the palette to build a custom theme. Changes apply instantly while custom mode is active.
+            </p>
+            <div class="settings-form__field">
+              <label for="customThemeScheme">Base variant</label>
+              <select id="customThemeScheme">
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+              </select>
+            </div>
+            <div class="settings-form__group">
+              <h3 class="settings-form__group-title">Interface</h3>
+              <div class="settings-form__colors">
+                <label class="settings-form__color" for="customBg">
+                  <span>Background</span>
+                  <input type="color" id="customBg" name="customBg" value="#0d1117">
+                </label>
+                <label class="settings-form__color" for="customPanel">
+                  <span>Panel</span>
+                  <input type="color" id="customPanel" name="customPanel" value="#161b22">
+                </label>
+                <label class="settings-form__color" for="customText">
+                  <span>Text</span>
+                  <input type="color" id="customText" name="customText" value="#e6edf3">
+                </label>
+                <label class="settings-form__color" for="customAccent">
+                  <span>Accent</span>
+                  <input type="color" id="customAccent" name="customAccent" value="#3fb950">
+                </label>
+                <label class="settings-form__color" for="customAccentSecondary">
+                  <span>Accent Secondary</span>
+                  <input type="color" id="customAccentSecondary" name="customAccentSecondary" value="#58a6ff">
+                </label>
+              </div>
+            </div>
+            <div class="settings-form__group">
+              <h3 class="settings-form__group-title">Graph Edges</h3>
+              <div class="settings-form__colors">
+                <label class="settings-form__color" for="customGraphEdge">
+                  <span>Base</span>
+                  <input type="color" id="customGraphEdge" name="customGraphEdge" value="#3a4b5e">
+                </label>
+                <label class="settings-form__color" for="customGraphEdgeHover">
+                  <span>Hover</span>
+                  <input type="color" id="customGraphEdgeHover" name="customGraphEdgeHover" value="#5cb2ff">
+                </label>
+                <label class="settings-form__color" for="customGraphEdgeSelect">
+                  <span>Select</span>
+                  <input type="color" id="customGraphEdgeSelect" name="customGraphEdgeSelect" value="#ffab3d">
+                </label>
+              </div>
+            </div>
+            <div class="settings-form__group">
+              <h3 class="settings-form__group-title">Graph Nodes</h3>
+              <div class="settings-form__colors">
+                <label class="settings-form__color" for="customGraphNodeFill">
+                  <span>Base Fill</span>
+                  <input type="color" id="customGraphNodeFill" name="customGraphNodeFill" value="#2b4a65">
+                </label>
+                <label class="settings-form__color" for="customGraphNodeHover">
+                  <span>Hover Fill</span>
+                  <input type="color" id="customGraphNodeHover" name="customGraphNodeHover" value="#3f6d90">
+                </label>
+                <label class="settings-form__color" for="customGraphNodeSelect">
+                  <span>Select Fill</span>
+                  <input type="color" id="customGraphNodeSelect" name="customGraphNodeSelect" value="#4b7da1">
+                </label>
+              </div>
+            </div>
+            <div class="settings-form__group">
+              <h3 class="settings-form__group-title">Graph Topics</h3>
+              <div class="settings-form__colors">
+                <label class="settings-form__color" for="customGraphTopicFill">
+                  <span>Base Fill</span>
+                  <input type="color" id="customGraphTopicFill" name="customGraphTopicFill" value="#14202c">
+                </label>
+                <label class="settings-form__color" for="customGraphTopicHover">
+                  <span>Hover Fill</span>
+                  <input type="color" id="customGraphTopicHover" name="customGraphTopicHover" value="#162331">
+                </label>
+                <label class="settings-form__color" for="customGraphTopicSelect">
+                  <span>Select Fill</span>
+                  <input type="color" id="customGraphTopicSelect" name="customGraphTopicSelect" value="#1f2e41">
+                </label>
+              </div>
+            </div>
+            <div class="settings-form__group">
+              <h3 class="settings-form__group-title">Graph Labels</h3>
+              <div class="settings-form__colors">
+                <label class="settings-form__color" for="customGraphLabelText">
+                  <span>Text</span>
+                  <input type="color" id="customGraphLabelText" name="customGraphLabelText" value="#f0f6fc">
+                </label>
+              </div>
+            </div>
+            <div class="settings-form__actions">
+              <button type="button" id="customThemeReset" class="secondary">Reset custom theme</button>
+            </div>
+          </section>
+        </section>
+      </div>
+    </form>
+  `;
   const form = container.querySelector('#settingsForm');
   const customSection = container.querySelector('#customThemeSection');
   const schemeSelect = container.querySelector('#customThemeScheme');
@@ -255,19 +343,75 @@ function ensureSettingsForm(container) {
     graphTopicSelect: container.querySelector('#customGraphTopicSelect'),
     graphLabelText: container.querySelector('#customGraphLabelText'),
   };
-  return { form, customSection, schemeSelect, resetButton, colorInputs };
+  const generalInputs = {
+    graphRefresh: container.querySelector('#generalGraphRefresh'),
+    streamAuto: container.querySelector('#generalStreamAuto'),
+    echoRefresh: container.querySelector('#generalEchoRefresh'),
+    plotRefresh: container.querySelector('#generalPlotRefresh'),
+  };
+  const tabButtons = Array.from(container.querySelectorAll('[data-settings-tab]'));
+  const tabPanels = new Map();
+  container.querySelectorAll('[data-settings-panel]').forEach(panel => {
+    const id = panel.dataset.settingsPanel;
+    if (id) {
+      tabPanels.set(id, panel);
+    }
+  });
+  let activeTab = 'general';
+  const activate = targetId => {
+    if (!targetId || !tabPanels.has(targetId)) {
+      return;
+    }
+    activeTab = targetId;
+    tabButtons.forEach(button => {
+      const isActive = button.dataset.settingsTab === targetId;
+      button.classList.toggle('settings-tabs__tab--active', isActive);
+      button.setAttribute('aria-selected', String(isActive));
+      button.tabIndex = isActive ? 0 : -1;
+    });
+    tabPanels.forEach((panel, id) => {
+      const isActive = id === targetId;
+      panel.hidden = !isActive;
+      panel.setAttribute('aria-hidden', String(!isActive));
+    });
+  };
+  tabButtons.forEach(button => {
+    button.addEventListener('click', () => {
+      activate(button.dataset.settingsTab);
+    });
+    button.addEventListener('keydown', event => {
+      if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+        event.preventDefault();
+        const index = tabButtons.indexOf(button);
+        const delta = event.key === 'ArrowRight' ? 1 : -1;
+        const nextIndex = (index + delta + tabButtons.length) % tabButtons.length;
+        const next = tabButtons[nextIndex];
+        if (next) {
+          activate(next.dataset.settingsTab);
+          next.focus();
+        }
+      }
+    });
+  });
+  activate(activeTab);
+  const tabs = {
+    buttons: tabButtons,
+    activate,
+    getActive: () => activeTab,
+  };
+  return { form, customSection, schemeSelect, resetButton, colorInputs, generalInputs, tabs };
 }
 
 function isSettingsOverlayOpen() {
   return Boolean(settingsOverlay?.classList.contains('active'));
 }
 
-function updateSettingsForm(state = themeManager.getState()) {
+function updateSettingsForm({ themeState = themeManager.getState(), generalState = generalSettingsState } = {}) {
   if (!settingsForm) {
     return;
   }
-  const theme = state?.theme ?? themeManager.getTheme();
-  const custom = state?.custom ?? themeManager.getState().custom;
+  const theme = themeState?.theme ?? themeManager.getTheme();
+  const custom = themeState?.custom ?? themeManager.getState().custom;
   const themeRadios = settingsForm.querySelectorAll("input[name='settingsTheme']");
   themeRadios.forEach(radio => {
     radio.checked = radio.value === theme;
@@ -293,6 +437,90 @@ function updateSettingsForm(state = themeManager.getState()) {
       input.value = value;
     }
   }
+  if (generalInputs) {
+    const generalStateSafe = generalState ?? DEFAULT_GENERAL_SETTINGS;
+    const manualDisabled = Boolean(generalStateSafe.streamAutoRefresh);
+    if (generalInputs.graphRefresh) {
+      generalInputs.graphRefresh.value =
+        generalStateSafe.graphRefreshIntervalMs ?? DEFAULT_GENERAL_SETTINGS.graphRefreshIntervalMs;
+    }
+    if (generalInputs.streamAuto) {
+      generalInputs.streamAuto.checked = Boolean(generalStateSafe.streamAutoRefresh);
+    }
+    if (generalInputs.echoRefresh) {
+      generalInputs.echoRefresh.value =
+        generalStateSafe.echoRefreshIntervalMs ?? DEFAULT_GENERAL_SETTINGS.echoRefreshIntervalMs;
+      generalInputs.echoRefresh.disabled = manualDisabled;
+    }
+    if (generalInputs.plotRefresh) {
+      generalInputs.plotRefresh.value =
+        generalStateSafe.plotRefreshIntervalMs ?? DEFAULT_GENERAL_SETTINGS.plotRefreshIntervalMs;
+      generalInputs.plotRefresh.disabled = manualDisabled;
+    }
+  }
+}
+
+function handleGeneralSettingsControl(target) {
+  if (!target || !generalInputs) {
+    return false;
+  }
+  if (target === generalInputs.streamAuto) {
+    generalSettings.update({ streamAutoRefresh: Boolean(target.checked) });
+    return true;
+  }
+  if (target === generalInputs.graphRefresh) {
+    const value = readIntegerInput(target);
+    if (value !== null) {
+      generalSettings.update({ graphRefreshIntervalMs: value });
+    } else {
+      target.value =
+        generalSettingsState.graphRefreshIntervalMs ?? DEFAULT_GENERAL_SETTINGS.graphRefreshIntervalMs;
+    }
+    return true;
+  }
+  if (target === generalInputs.echoRefresh) {
+    const value = readIntegerInput(target);
+    if (value !== null) {
+      generalSettings.update({ echoRefreshIntervalMs: value });
+    } else {
+      target.value =
+        generalSettingsState.echoRefreshIntervalMs ?? DEFAULT_GENERAL_SETTINGS.echoRefreshIntervalMs;
+    }
+    return true;
+  }
+  if (target === generalInputs.plotRefresh) {
+    const value = readIntegerInput(target);
+    if (value !== null) {
+      generalSettings.update({ plotRefreshIntervalMs: value });
+    } else {
+      target.value =
+        generalSettingsState.plotRefreshIntervalMs ?? DEFAULT_GENERAL_SETTINGS.plotRefreshIntervalMs;
+    }
+    return true;
+  }
+  return false;
+}
+
+function readIntegerInput(input) {
+  if (!input) {
+    return null;
+  }
+  const value = Number.parseInt(input.value, 10);
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  return value;
+}
+
+function isGeneralNumberInput(target) {
+  if (!generalInputs) {
+    return false;
+  }
+  return (
+    target === generalInputs.graphRefresh ||
+    target === generalInputs.echoRefresh ||
+    target === generalInputs.plotRefresh
+  );
 }
 
 function openSettingsOverlay() {
@@ -300,6 +528,9 @@ function openSettingsOverlay() {
     return;
   }
   updateSettingsForm();
+  if (settingsTabs?.activate) {
+    settingsTabs.activate('general');
+  }
   settingsOverlay.classList.add('active');
   settingsOverlay.setAttribute('aria-hidden', 'false');
   if (settingsBtn) {
@@ -330,6 +561,9 @@ function handleSettingsFormChange(event) {
   if (!target) {
     return;
   }
+  if (handleGeneralSettingsControl(target)) {
+    return;
+  }
   if (target instanceof HTMLInputElement && target.name === 'settingsTheme') {
     themeManager.setTheme(target.value);
     return;
@@ -344,6 +578,15 @@ function handleSettingsFormChange(event) {
 
 function handleSettingsFormInput(event) {
   const target = event.target;
+  if (!target) {
+    return;
+  }
+  if (isGeneralNumberInput(target)) {
+    return;
+  }
+  if (handleGeneralSettingsControl(target)) {
+    return;
+  }
   if (!(target instanceof HTMLInputElement) || target.type !== 'color') {
     return;
   }
@@ -443,9 +686,15 @@ function scheduleNextRefresh() {
   if (refreshTimer) {
     window.clearTimeout(refreshTimer);
   }
+  const interval =
+    generalSettingsState?.graphRefreshIntervalMs ??
+    DEFAULT_GENERAL_SETTINGS.graphRefreshIntervalMs ??
+    GRAPH_REFRESH_INTERVAL_MS;
+  const numericInterval = Number(interval);
+  const delay = Math.max(500, Number.isFinite(numericInterval) ? numericInterval : GRAPH_REFRESH_INTERVAL_MS);
   refreshTimer = window.setTimeout(() => {
     void loadGraph({ silent: true });
-  }, GRAPH_REFRESH_INTERVAL_MS);
+  }, delay);
 }
 
 async function loadGraph({ manual = false, silent = false } = {}) {
